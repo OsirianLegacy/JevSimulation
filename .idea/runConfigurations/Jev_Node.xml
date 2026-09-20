@@ -1,0 +1,8 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="Jev Node" type="NodeJSConfigurationType" factoryName="Node.js" singleton="true">
+    <option name="node-interpreter" value="C:/Program Files/nodejs/node.exe" />
+    <option name="working-dir" value="$PROJECT_DIR$" />
+    <option name="path-to-js-file" value="$PROJECT_DIR$/scripts/test-jev.mjs" />
+    <method v="2" />
+  </configuration>
+</component>

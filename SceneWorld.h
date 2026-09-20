@@ -1,0 +1,111 @@
+#pragma once
+#include "WorldDocument.h"
+#include <memory>
+class SceneWorld {
+  public:
+    explicit SceneWorld(int width = 1000, int height = 1000, float cellSize = 8.0f, Vector2 origin = {});
+    int width() const;
+    int height() const;
+    float cellSize() const;
+    std::size_t count() const;
+    bool contains(CellPosition cell) const;
+    std::size_t index(CellPosition cell) const; // Throws outside grid.
+    CellPosition coordinates(std::size_t index) const;
+    const GridCell &at(CellPosition cell) const;
+    const GridCell *tryGet(CellPosition cell) const;
+    void set(CellPosition cell, GridCell value);
+    void fill(GridCell value);
+    void clear();
+    void fillRegion(CellRange region, GridCell value); // Clips to grid bounds.
+    bool isWalkable(CellPosition cell) const;          // False outside grid.
+    bool blocksSight(CellPosition cell) const;         // True outside grid.
+    void paint(CellPosition cell, GridLayer layer, TileRef tile);
+    void erase(CellPosition cell, GridLayer layer);
+    Guid placeObject(CellPosition cell, TileRef tile, ObjectType type);
+    Guid placeObject(CellPosition cell, TileRef tile, const std::string &definitionId);
+    void bindObjectType(Guid object, const std::string &definitionId);
+    void createItemDefinition(ItemDefinition definition);
+    void createObjectType(ObjectTypeDefinition definition);
+    std::map<std::string, ItemDefinition> itemDefinitions() const;
+    std::map<std::string, ObjectTypeDefinition> objectTypes() const;
+    static constexpr std::size_t maxDefinitions = 4096;
+    static constexpr std::size_t maxGuidHistory = 4'000'000;
+    bool hasUsedGuid(Guid id) const;
+    GuidState guidState() const;
+    // Deserialization-only: validates a complete identity table before applying it.
+    void restoreGuidState(GuidState state);
+    std::optional<Object> findObject(Guid id) const;
+    std::optional<Object> objectAt(CellPosition cell) const;
+    std::optional<CellPosition> objectPosition(Guid id) const;
+    bool moveObjectById(Guid id, CellPosition destination);
+    void removeObjectById(Guid id);
+    bool moveObject(CellPosition from, CellPosition to);
+    void removeObject(CellPosition cell);
+    void updateObject(Guid id, bool open, std::vector<Item> contents);
+    std::optional<scene::Resource> resources(Guid id) const;
+    std::optional<scene::ResourcePool> resource(Guid id, const std::string &key) const;
+    void setResource(Guid id, const std::string &key, scene::ResourcePool pool);
+    void removeResource(Guid id, const std::string &key);
+    float adjustResource(Guid id, const std::string &key, float delta);
+    bool trySpendResource(Guid id, const std::string &key, float amount);
+    void setObjectOpen(Guid id, bool open);
+    void addItem(Guid id, Item item);
+    void updateItem(Guid id, std::size_t index, Item item);
+    void removeItem(Guid id, std::size_t index);
+    std::size_t objectCount() const;
+    // Validated deserialization entry point; rejects occupied cells and duplicate IDs.
+    void restoreObject(CellPosition cell, TileRef tile, Guid id, ObjectType type, bool open,
+                       std::vector<Item> contents);
+    std::vector<CellPosition> neighbors(CellPosition cell, bool diagonals = false,
+                                        bool walkableOnly = false) const;
+    // Paths include both endpoints; empty means invalid, blocked, or unreachable.
+    // Diagonal paths never cut across blocked corners.
+    std::vector<CellPosition> aStar(CellPosition start, CellPosition goal, bool diagonals = false) const;
+    std::vector<CellPosition> breadthFirstSearch(CellPosition start, CellPosition goal,
+                                                 bool diagonals = false) const;
+    // Cell-center supercover LOS: Walls/Entities/closed Doors (including touched corners) occlude.
+    bool hasLineOfSight(CellPosition start, CellPosition goal) const;
+    std::optional<CellPosition> worldToCell(Vector2 world) const;
+    Vector2 cellToWorld(CellPosition cell) const; // Top-left corner.
+    Vector2 cellCenter(CellPosition cell) const;
+    Rectangle cellBounds(CellPosition cell) const;
+    Rectangle worldBounds() const;
+    CellRange visibleRange(Rectangle worldView) const;
+    void draw(Rectangle worldView, const TilesetLibrary *tilesets = nullptr) const;
+
+    ~SceneWorld();
+    SceneWorld(SceneWorld &&) noexcept;
+    SceneWorld &operator=(SceneWorld &&) noexcept;
+    SceneWorld(const SceneWorld &) = delete;
+    SceneWorld &operator=(const SceneWorld &) = delete;
+    WorldDocument document() const;
+    static SceneWorld fromDocument(const WorldDocument &document);
+    void setHistoryEnabled(bool enabled);
+    void beginEdit();
+    void endEdit();
+    void cancelEdit();
+    bool undo();
+    bool redo();
+    bool canUndo() const;
+    bool canRedo() const;
+    void clearHistory();
+    void markSaved();
+    bool dirty() const;
+    void tick();
+    std::uint64_t ticks() const;
+    double simulationTime() const;
+    std::size_t persistentEntityCount() const;
+    bool editableField(Guid id, const std::string &field) const;
+    std::vector<std::string> componentNames(Guid id) const;
+    void reserveHistory(const std::unordered_set<Guid, GuidHash> &history);
+
+  private:
+    struct Impl;
+    struct Operation;
+    std::unique_ptr<Impl> impl_;
+    void touch(CellPosition cell);
+    void touchResources(Guid id);
+    void install(CellPosition cell, const Object &object, TileRef tile);
+    void eraseInstance(Guid id);
+    void applyHistory(bool forward);
+};

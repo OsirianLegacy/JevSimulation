@@ -1,0 +1,6 @@
+#pragma once
+inline constexpr wchar_t JevNodeExecutable[] = LR"jev(@JEV_NODE_EXECUTABLE@)jev";
+inline constexpr wchar_t JevProjectDirectory[] = LR"jev(@CMAKE_CURRENT_SOURCE_DIR@)jev";
+inline constexpr wchar_t JevTestScript[] = LR"jev(@CMAKE_CURRENT_SOURCE_DIR@/scripts/test-jev.mjs)jev";
+inline constexpr wchar_t JevTilesetDirectory[] = LR"jev(@CMAKE_CURRENT_SOURCE_DIR@/Assets/Tilesets)jev";
+inline constexpr wchar_t JevMapFile[] = LR"jev(@CMAKE_CURRENT_SOURCE_DIR@/Maps/world.jevmap)jev";

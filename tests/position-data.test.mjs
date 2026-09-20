@@ -1,0 +1,21 @@
+import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+
+const output = execFileSync(process.argv[2], { encoding: 'utf8' });
+const [initial, fractional, negative, custom] = output.trim().split(/\r?\n/).map(JSON.parse);
+assert.equal(initial.component, 'Position');
+assert.equal(typeof initial.rulesDescription, 'string');
+assert.ok(initial.rulesDescription.includes('floor((worldPosition - gridOrigin) / cellSize)'));
+assert.deepEqual(initial.worldPosition, { x: 0, y: 0 });
+assert.deepEqual(initial.cellCoordinates, { x: 0, y: 0 });
+assert.equal(initial.cellSize, 8);
+assert.deepEqual(initial.gridOrigin, { x: 0, y: 0 });
+assert.deepEqual(fractional.worldPosition, { x: 15.5, y: 8 });
+assert.deepEqual(fractional.cellCoordinates, { x: 1, y: 1 });
+assert.deepEqual(negative.worldPosition, { x: -0.25, y: -8.25 });
+assert.deepEqual(negative.cellCoordinates, { x: -1, y: -2 });
+assert.deepEqual(custom.worldPosition, { x: 15.5, y: -12 });
+assert.deepEqual(custom.cellCoordinates, { x: 1, y: 2 });
+assert.equal(custom.cellSize, 4);
+assert.deepEqual(custom.gridOrigin, { x: 10, y: -20 });
+console.log('Position component and JSON tests passed.');
