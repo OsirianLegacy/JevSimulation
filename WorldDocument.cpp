@@ -161,6 +161,21 @@ GuidState WorldDocument::guidState() const {
     state.used = usedGuids_;
     return state;
 }
+void WorldDocument::validateHarvestables() const {
+    if (harvestables.size()>objectCount()) throw std::invalid_argument("Too many harvestable owners.");
+    for (const auto &[id,h]:harvestables) {
+        const auto object=findObject(id);
+        const auto r=resources.find(id);
+        const auto *pool=r==resources.end()?nullptr:r->second.find(scene::Harvestable::Units);
+        const auto definition=creatureCatalog.harvestables.find(h.definitionId);
+        if (!object || object->type()!=ObjectType::Gatherable || !pool || definition==creatureCatalog.harvestables.end() ||
+            !h.sourceTile.present() || h.sourceTile.column<0 || h.sourceTile.row<0 ||
+            !std::isfinite(h.regenerationRemaining) || h.regenerationRemaining<0 ||
+            h.regenerationRemaining>definition->second.regenerationSeconds || (!pool->depleted() && h.regenerationRemaining!=0))
+            throw std::invalid_argument("Invalid harvestable record.");
+        scene::validateHarvestPool(*pool);
+    }
+}
 void WorldDocument::validateGuidState(const GuidState &state) const {
     if (state.items.size() != itemDefinitions_.size() || state.types.size() != objectTypes_.size() ||
         state.contents.size() != objects_.size() || state.used.size() > maxGuidHistory ||
@@ -171,7 +186,12 @@ void WorldDocument::validateGuidState(const GuidState &state) const {
         if (id.empty() || !state.used.contains(id) || !active.insert(id).second)
             throw std::invalid_argument("Missing, empty, or duplicate GUID across world systems.");
     };
-    for (const auto &creature : creatures) claim(creature.id);
+    for (const auto &creature : creatures) {
+        scene::dispositionName(creature.disposition);
+        claim(creature.id);
+        scene::Inventory::validate(creature.inventory);
+        for (const auto &item : creature.inventory) claim(item.guid);
+    }
     for (const auto &[key, item] : itemDefinitions_)
         claim(state.items.at(key));
     for (const auto &[key, type] : objectTypes_)
@@ -203,4 +223,15 @@ void WorldDocument::restoreGuidState(GuidState state) {
 
 Rectangle WorldDocument::worldBounds() const {
     return {origin_.x, origin_.y, width_ * cellSize_, height_ * cellSize_};
+}
+
+void WorldDocument::validateHumanNames() const {
+    if(humanNames.size()>4'000'000)throw std::invalid_argument("Too many human names.");
+    const auto ids=guidState();
+    std::unordered_set<std::string> names;
+    for(const auto &[id,name]:humanNames) {
+        name.validate();
+        if(!ids.used.contains(id) || !names.insert(name.full()).second)
+            throw std::invalid_argument("Human names require known identities and unique first/last combinations.");
+    }
 }

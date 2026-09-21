@@ -59,7 +59,8 @@ void CatalogEditor::draw(const SceneWorld& grid,bool types,int height) const {
     } else DrawText("Use saved items in object contents.",16,250,14,LIGHTGRAY);
     textBox({16,306,328,34},"Create + Save map");
     textBox({16,352,328,34},"New / Clear draft");
-    std::string rest=message_; int y=406;
+    if(types)textBox({16,394,328,28},"Harvest definitions...");
+    std::string rest=message_; int y=types?444:406;
     while(!rest.empty() && y<height-100) {
         std::size_t n=rest.size();
         while(n>1 && MeasureText(rest.substr(0,n).c_str(),14)>324) --n;

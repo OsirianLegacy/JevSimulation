@@ -5,8 +5,9 @@ import { execFileSync } from 'node:child_process';
 const output = execFileSync(process.argv[2], { encoding: 'utf8' });
 const [empty, initial, changed, special] = output.trim().split(/\r?\n/).map(JSON.parse);
 const rules = 'Named pools track available amounts and capacities. Values stay between zero and maximum. '
-  + 'Spending requires the full amount; adjustments clamp to bounds. No automatic regeneration or depletion effects.';
-const healthRules = 'Remaining vitality. Zero means depleted; death is not automatic.';
+  + 'Spending requires the full amount; adjustments clamp to bounds. Creature needs drain during simulation. '
+  + 'No automatic regeneration or depletion effects.';
+const healthRules = 'Remaining vitality. Depleted creatures cannot act; configured species become carcasses during simulation.';
 const manaRules = 'Pool reserved for mana. No spell costs are configured.';
 const customRules = 'Custom resource pool; gameplay purpose is unspecified.';
 assert.deepEqual(empty, { component: 'Resource', rulesDescription: rules, pools: {} });

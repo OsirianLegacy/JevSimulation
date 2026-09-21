@@ -22,6 +22,65 @@ template <class F> void rejects(F f) {
 }
 int main(int argc, char **argv) {
     try {
+        {
+            Resource needs;
+            needs.set(Resource::Hunger, ResourcePool(200));
+            needs.set(Resource::Thirst, ResourcePool(100));
+            needs.set(Resource::Sleep, ResourcePool(90));
+            needs.set(Resource::Health, ResourcePool(100));
+            needs.advanceNeeds(150);
+            check(needs.find(Resource::Hunger)->current() == 150 &&
+                  needs.find(Resource::Thirst)->current() == 50 &&
+                  needs.find(Resource::Sleep)->current() == 75, "Need rates scale with capacity");
+            const auto before=needs;
+            rejects([&] { needs.advanceNeeds(-1); });
+            rejects([&] { needs.advanceNeeds(std::numeric_limits<float>::infinity()); });
+            rejects([&] { needs.advanceNeeds(std::numeric_limits<float>::quiet_NaN()); });
+            needs.advanceNeeds(0);
+            check(needs==before, "Invalid and zero time leave needs unchanged");
+            needs.advanceNeeds(std::numeric_limits<float>::max());
+            check(needs.find(Resource::Sleep)->depleted() && needs.find(Resource::Hunger)->depleted() &&
+                  needs.find(Resource::Thirst)->depleted() && needs.find(Resource::Health)->full(),
+                  "Long elapsed time clamps needs without health damage");
+            needs.adjust(Resource::Hunger,1000);
+            needs.remove(Resource::Sleep);
+            needs.set(Resource::Thirst,ResourcePool(0));
+            needs.advanceNeeds(1);
+            check(!needs.find(Resource::Sleep) && needs.find(Resource::Thirst)->current()==0,
+                  "Absent and disabled needs remain disabled");
+        }
+        {
+            SceneWorld author(2,1);
+            author.paint({0,0},GridLayer::Ground,{0,0,0});
+            const auto creature=author.spawnCreature({0,0});
+            const auto object=author.placeObject({1,0},{0,0,0},ObjectType::Container);
+            author.setResource(object,Resource::Hunger,ResourcePool(100));
+            check(author.resource(creature,Resource::Hunger)->full() &&
+                  author.resource(creature,Resource::Thirst)->full() &&
+                  author.resource(creature,Resource::Sleep)->full(), "Default species starts with full needs");
+            PlaySession session;
+            session.start(author);
+            session.pause(true);
+            session.advance(10);
+            check(session.world().resource(creature,Resource::Hunger)->full(),"Paused needs do not drain");
+            session.step();
+            check(!session.world().resource(creature,Resource::Hunger)->full() &&
+                  author.resource(creature,Resource::Hunger)->full() &&
+                  session.world().resource(object,Resource::Hunger)->full(),
+                  "Step drains only runtime creatures, not objects or authoring state");
+            for(int tick=1;tick<60;++tick) session.world().tick();
+            check(std::abs(session.world().resource(creature,Resource::Thirst)->current()-(100-100.0f/300))<0.001f,
+                  "Fixed ticks drain one second of needs");
+            auto restored=SceneWorld::fromDocument(session.world().document());
+            check(restored.resources(creature)==session.world().resources(creature),"Need snapshots round trip");
+            if(argc>1) {
+                const std::string path=std::string(argv[1])+".needs";
+                saveMap(path,session.world(),{{"test.png",8,8}});
+                auto loaded=loadMap(path,{{"test.png",8,8}});
+                check(loaded.resources(creature)==session.world().resources(creature),"Need save round trip");
+            }
+            session.stop(author);
+        }
         ResourcePool pool(50);
         check(pool.current() == 50 && pool.full(), "Pools start full");
         check(pool.adjust(-70) == -50 && pool.depleted(), "Drain clamps to zero");

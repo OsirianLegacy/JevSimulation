@@ -3,7 +3,7 @@
 #include <cctype>
 #include <iostream>
 
-TilesetLibrary::TilesetLibrary(const std::filesystem::path& directory) {
+TilesetLibrary::TilesetLibrary(const std::filesystem::path& directory) : assetsDirectory_(directory.parent_path()) {
     std::vector<std::filesystem::path> files;
     std::error_code error;
     for (std::filesystem::directory_iterator it(directory, error), end; !error && it != end; it.increment(error)) {

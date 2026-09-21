@@ -48,17 +48,31 @@ export function createDecisionServer({mode = 'fake', apiKey = '', maxConcurrency
   });
 }
 async function main() {
-  const args = process.argv.slice(2); const configIndex = args.indexOf('--config');
-  for (let i=0;i<args.length;i++) { if (args[i]==='--live') continue; if(args[i]==='--config' && args[i+1]) { i++; continue; } throw new Error('Usage: decision-proxy.mjs [--config path] [--live]'); }
-  const path = configIndex >= 0 ? args[configIndex+1] : fileURLToPath(new URL('../ai-config.json',import.meta.url));
-  const config = JSON.parse(readFileSync(path,'utf8')); if (config.version !== 1) throw new Error('Unsupported config version');
-  const live = args.includes('--live');
+  const args = process.argv.slice(2);
+  let configPath=fileURLToPath(new URL('../ai-config.json',import.meta.url)), mode, portOverride, announce=false;
+  for (let i=0;i<args.length;i++) {
+    if (args[i]==='--live') mode='live';
+    else if (args[i]==='--fake') mode='fake';
+    else if (args[i]==='--announce') announce=true;
+    else if (args[i]==='--config' && args[i+1]) configPath=args[++i];
+    else if (args[i]==='--port' && args[i+1]) portOverride=Number(args[++i]);
+    else throw new Error('Invalid proxy arguments');
+  }
+  const config = JSON.parse(readFileSync(configPath,'utf8')); if (config.version !== 1) throw new Error('Unsupported config version');
+  mode ??= config.proxy?.mode ?? 'live';
+  if (!['fake','live'].includes(mode)) throw new Error('Invalid provider mode');
+  const live = mode==='live';
   if (live) for (const name of ['.env.local','.env']) if (existsSync(name)) loadEnvFile(name);
-  const port = config.proxy?.port ?? 8787;
-  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid proxy port');
+  const port = portOverride ?? config.proxy?.port ?? 8787;
+  if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('Invalid proxy port');
   const server = createDecisionServer({mode:live ? 'live' : 'fake', apiKey:live ? (process.env.AI_GATEWAY_API_KEY || process.env.API_KEY || '') : '',
     maxConcurrency:config.proxy?.maxConcurrency,requestsPerSecond:config.proxy?.requestsPerSecond,timeoutMs:config.timeout*1000});
   server.requestTimeout = 5000; server.headersTimeout = 5000;
-  server.listen(port,'127.0.0.1',() => console.error(`Decision proxy listening on 127.0.0.1:${port} (${live?'live':'fake'})`));
+  server.on('error',()=>{console.error('Proxy could not bind to loopback.');process.exitCode=1;});
+  server.listen(port,'127.0.0.1',() => {
+    const address=server.address();
+    if (announce) console.log(JSON.stringify({url:`http://127.0.0.1:${address.port}/decision`,mode}));
+    console.error(`Decision proxy listening on 127.0.0.1:${address.port} (${mode})`);
+  });
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main().catch(() => { console.error('Proxy startup failed; check config and server-side credentials.'); process.exitCode=1; });

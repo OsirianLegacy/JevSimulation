@@ -35,6 +35,8 @@ void ObjectInspector::resetDraft(const Object& object) {
     canOpen_=grid_ && grid_->editableField(object.id(),"open");
     canContain_=grid_ && grid_->editableField(object.id(),"contents");
     selected_ = object.id(); type_ = object.type(); open_ = object.isOpen();
+    const auto harvest=grid_?grid_->harvestable(selected_):std::nullopt;
+    harvestId_=harvest?harvest->definitionId:"";
     rows_.clear(); focus_ = -1; error_.clear();
     for (const auto& item : object.contents()) rows_.push_back({item.definitionId, item.displayName, std::to_string(item.quantity),item.guid});
 }
@@ -45,7 +47,7 @@ void ObjectInspector::select(const SceneWorld& grid, CellPosition cell) {
 void ObjectInspector::refresh(const SceneWorld& world){grid_=&world;if(const auto object=world.findObject(selected_))resetDraft(*object);else clear();}
 void ObjectInspector::clampScroll(int height) {
     if(detailsMode_ && grid_){scroll_=std::clamp(scroll_,0.0f,std::max(0.0f,static_cast<float>(fieldLines(*grid_,detail_.empty()?selected_:detail_).size()*20+60)-view(height).height));return;}
-    const float content = 134 + static_cast<float>(rows_.size()) * 122 + (canContain_ ? 36 : 0);
+    const float content = 134 + static_cast<float>(rows_.size()) * 122 + (canContain_ ? 36 : 0) + (type_==ObjectType::Gatherable?76:0);
     scroll_ = std::clamp(scroll_, 0.0f, std::max(0.0f, content - view(height).height));
 }
 void ObjectInspector::update(SceneWorld& grid, const EditorInput& input, int height, bool readOnly) {
@@ -78,7 +80,14 @@ void ObjectInspector::update(SceneWorld& grid, const EditorInput& input, int hei
                         throw std::invalid_argument("Quantity must be 1..4294967295.");
                     items.push_back({row.definition, row.name, quantity,row.guid});
                 }
-                grid.updateObject(selected_, open_, std::move(items));
+                grid.beginEdit();
+                try {
+                    grid.updateObject(selected_, open_, std::move(items));
+                    const auto h=grid.harvestable(selected_);
+                    if(harvestId_.empty())grid.removeHarvestable(selected_);
+                    else if(!h || h->definitionId!=harvestId_)grid.setHarvestable(selected_,harvestId_);
+                    grid.endEdit();
+                } catch (...) {grid.cancelEdit();throw;}
                 resetDraft(*grid.findObject(selected_));
             } catch (const std::exception& error) { error_ = error.what(); }
             return;
@@ -86,6 +95,12 @@ void ObjectInspector::update(SceneWorld& grid, const EditorInput& input, int hei
         if (hit(input.mouse, {184, static_cast<float>(height - 168), 160, 28})) { resetDraft(*object); return; }
         if (hit(input.mouse, area)) {
             const float top = area.y - scroll_;
+            if(type_==ObjectType::Gatherable && hit(input.mouse,{16,top+170+rows_.size()*122,328,28})) {
+                const auto &defs=grid.creatureCatalog().harvestables;
+                auto it=defs.find(harvestId_);
+                if(harvestId_.empty())it=defs.begin();else if(it!=defs.end())++it;
+                harvestId_=it==defs.end()?"":it->first;
+            }
             if (canOpen_ && hit(input.mouse, {16, top + 78, 328, 28})) open_ = !open_;
             if(canContain_ && !grid.itemDefinitions().empty() && hit(input.mouse,{16,top+110,328,24}))
                 itemChoice_=(itemChoice_+1)%(grid.itemDefinitions().size()+1);
@@ -167,8 +182,12 @@ void ObjectInspector::draw(int height) const {
         box({100,y+88,244,26}, row.quantity, focus_ == static_cast<int>(i)*3+2);
     }
     if (canContain_) box({16,top+134+rows_.size()*122,328,28}, "+ Add item stack");
+    if(type_==ObjectType::Gatherable) {
+        box({16,top+170+rows_.size()*122,328,28},"Harvest: "+(harvestId_.empty()?"None":harvestId_)+" >");
+        DrawText("Apply to assign. Yields are separate from contents.",16,int(top+204+rows_.size()*122),12,GRAY);
+    }
     EndScissorMode();
-    const float content = 134 + rows_.size()*122 + (canContain_ ? 36 : 0);
+    const float content = 134 + rows_.size()*122 + (canContain_ ? 36 : 0) + (type_==ObjectType::Gatherable?76:0);
     if (content > area.height) {
         const float thumb = std::max(16.0f, area.height * area.height / content);
         DrawRectangle(347, 214, 5, static_cast<int>(area.height), Color{35,43,54,255});

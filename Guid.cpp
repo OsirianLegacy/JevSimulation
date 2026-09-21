@@ -1,4 +1,17 @@
 #include "Guid.h"
+#include <stdexcept>
+
+Guid Guid::fromString(const std::string &text) {
+    if (text.size()!=36) throw std::invalid_argument("Invalid GUID text.");
+    Guid id;std::size_t byte=0;
+    const auto hex=[](char c)->int {if(c>='0'&&c<='9')return c-'0';if(c>='a'&&c<='f')return c-'a'+10;if(c>='A'&&c<='F')return c-'A'+10;throw std::invalid_argument("Invalid GUID digit.");};
+    for(std::size_t i=0;i<text.size();) {
+        if(i==8 || i==13 || i==18 || i==23) {if(text[i++]!='-')throw std::invalid_argument("Invalid GUID separator.");continue;}
+        id.bytes[byte++]=static_cast<std::uint8_t>((hex(text[i])<<4)|hex(text[i+1]));i+=2;
+    }
+    if(id.empty()) throw std::invalid_argument("Empty GUID.");
+    return id;
+}
 #include <random>
 #include <stdexcept>
 

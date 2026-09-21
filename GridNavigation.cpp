@@ -96,8 +96,15 @@ std::vector<CellPosition> SceneWorld::breadthFirstSearch(CellPosition start, Cel
     return {};
 }
 
-bool SceneWorld::hasLineOfSight(CellPosition start, CellPosition goal) const {
-    if (blocksSight(start) || blocksSight(goal)) return false;
+bool SceneWorld::hasLineOfSight(CellPosition start, CellPosition goal,bool allowOccupiedEndpoints) const {
+    const auto blocked=[&](CellPosition cell) {
+        if(!allowOccupiedEndpoints || (cell!=start && cell!=goal))return blocksSight(cell);
+        const auto terrain=tryGet(cell);
+        if(!terrain || terrain->layersBlockSight())return true;
+        const auto object=objectAt(cell);
+        return object && object->type()==ObjectType::Door && !object->isOpen();
+    };
+    if (blocked(start) || blocked(goal)) return false;
     const std::int64_t nx = std::abs(goal.x - start.x), ny = std::abs(goal.y - start.y);
     const int sx = (goal.x > start.x) - (goal.x < start.x);
     const int sy = (goal.y > start.y) - (goal.y < start.y);
@@ -108,15 +115,15 @@ bool SceneWorld::hasLineOfSight(CellPosition start, CellPosition goal) const {
         const auto crossX = (1 + 2 * ix) * ny;
         const auto crossY = (1 + 2 * iy) * nx;
         if (crossX == crossY) {
-            if (blocksSight({current.x + sx, current.y}) ||
-                blocksSight({current.x, current.y + sy})) return false;
+            if (blocked({current.x + sx, current.y}) ||
+                blocked({current.x, current.y + sy})) return false;
             current.x += sx; current.y += sy; ++ix; ++iy;
         } else if (crossX < crossY) {
             current.x += sx; ++ix;
         } else {
             current.y += sy; ++iy;
         }
-        if (blocksSight(current)) return false;
+        if (blocked(current)) return false;
     }
     return true;
 }

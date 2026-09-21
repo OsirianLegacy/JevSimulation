@@ -3,6 +3,9 @@ import assert from 'node:assert/strict';
 import { spawn, execFile } from 'node:child_process';
 import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createDecisionServer } from '../scripts/decision-proxy.mjs';
 import { choose, inquiry, validateRequest } from '../scripts/decision-protocol.mjs';
 const request = () => ({version:1,session:'s',request:'r',revision:1,self:{health:{current:100,maximum:100}},rules:{move:'Move'},range:{radius:8},previousGoal:null,
@@ -54,5 +57,28 @@ test('provider failure becomes generic failure',async t=>{
 test('C++ pipe transport integrates with local proxy', {skip:!process.env.JEV_BRIDGE_HOST}, async t=>{
   const url=await server(t);
   const output=await new Promise((resolve,reject)=>execFile(process.env.JEV_BRIDGE_HOST,[url],{timeout:15000},(error,stdout,stderr)=>error?reject(new Error(stderr||error.message)):resolve(stdout)));
+  assert.match(output,/C\+\+ bridge passed/);
+});
+test('Jev receives dispositions and can select a validated attack', async t=>{
+  const r=request();const target='12345678-1234-1234-1234-123456789abc';
+  r.self.identity={disposition:'friendly'};
+  r.nearbyEntities=[{id:target,disposition:'hostile',health:{current:30,maximum:100},cell:{x:2,y:1},enemy:true}];
+  r.rules.attack='Approach and attack a living adjacent target.';
+  r.candidates[0]={id:'c0',action:'attack',parameters:{target}};
+  const payload=inquiry(r);assert.deepEqual(JSON.parse(payload.state).nearbyEntities,r.nearbyEntities);
+  assert.match(payload.questions.c0.instructions,/dispositions/);
+  const url=await server(t);const response=await post(url,r);
+  assert.equal(response.status,200);assert.equal((await response.json()).candidate,'c0');
+  r.candidates[0].parameters.target='bad';assert.throws(()=>validateRequest(r));
+});
+
+test('C++ transport starts and reuses its own managed proxy', {skip:!process.env.JEV_BRIDGE_HOST}, async t=>{
+  const directory=mkdtempSync(join(tmpdir(),'jev-managed-'));
+  t.after(()=>rmSync(directory,{recursive:true,force:true}));
+  const config=join(directory,'config.json');
+  writeFileSync(config,JSON.stringify({version:1,timeout:2,proxy:{mode:'fake'}}));
+  const output=await new Promise((resolve,reject)=>execFile(process.env.JEV_BRIDGE_HOST,
+    ['http://127.0.0.1:1/decision',config],{timeout:15000},
+    (error,stdout,stderr)=>error?reject(new Error(stderr||error.message)):resolve(stdout)));
   assert.match(output,/C\+\+ bridge passed/);
 });

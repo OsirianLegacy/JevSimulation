@@ -54,6 +54,10 @@ void validateCatalog(const std::vector<TilesetDescriptor>& sheets) {
 
 void saveDocument(const std::filesystem::path& file, const WorldDocument& grid, const std::vector<TilesetDescriptor>& sheets) {
     validateCatalog(sheets);
+    grid.creatureCatalog.validate();
+    grid.validateGuidState(grid.guidState());
+    grid.validateHumanNames();
+    grid.validateHarvestables();
     require(grid.count() <= maxCells && grid.cellSize() == 8, "Maps must use 8x8 cells and at most 2048x2048 cells.");
     std::vector<int> used(sheets.size(), -1);
     std::vector<int> ids;
@@ -69,6 +73,14 @@ void saveDocument(const std::filesystem::path& file, const WorldDocument& grid, 
             ++records;
         }
     }
+    const auto registerTile=[&](TileRef tile) {
+        require(tile.tileset>=0 && static_cast<std::size_t>(tile.tileset)<sheets.size(),"Unknown carcass tilesheet.");
+        require(tile.column>=0 && tile.column<sheets[tile.tileset].columns && tile.row>=0 && tile.row<sheets[tile.tileset].rows,"Carcass tile outside tilesheet.");
+        if(used[tile.tileset]<0){used[tile.tileset]=static_cast<int>(ids.size());ids.push_back(tile.tileset);}
+    };
+    for (const auto &[id,s]:grid.creatureCatalog.species) if (!s.carcassHarvest.empty()) registerTile(s.carcassTile);
+    for (const auto &[id,d]:grid.creatureCatalog.harvestables) if (d.depletedTile.present()) registerTile(d.depletedTile);
+    for (const auto &[id,h]:grid.harvestables) registerTile(h.sourceTile);
     if (!file.parent_path().empty()) std::filesystem::create_directories(file.parent_path());
     auto temporary = file;
     std::random_device random;
@@ -77,7 +89,7 @@ void saveDocument(const std::filesystem::path& file, const WorldDocument& grid, 
         std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
         require(static_cast<bool>(out), "Cannot create temporary map save.");
         out.write("JEVMAP01", 8);
-        write32(out, !grid.creatures.empty() ? 6 : grid.resources.empty() ? 4 : 5); // Version 5 adds optional resource pools.
+        write32(out, 11); // Per-creature disposition, following persistent human names.
         write32(out, grid.width()); write32(out, grid.height());
         write32(out, std::bit_cast<std::uint32_t>(grid.cellSize()));
         const auto bounds = grid.worldBounds();
@@ -111,15 +123,6 @@ void saveDocument(const std::filesystem::path& file, const WorldDocument& grid, 
             for (const auto& item : object->contents()) {
                 writeText(out, item.definitionId); writeText(out, item.displayName); write32(out, item.quantity);
             }
-        if (!grid.creatures.empty()) {
-            write32(out, static_cast<std::uint32_t>(grid.creatures.size()));
-            for (const auto &r : grid.creatures) {
-                writeGuid(out, r.id); writeText(out, r.type); write32(out, static_cast<std::uint32_t>(r.control));
-                write32(out, std::bit_cast<std::uint32_t>(r.position.worldPosition().x));
-                write32(out, std::bit_cast<std::uint32_t>(r.position.worldPosition().y));
-            }
-        }
-        require(out.tellp() <= 400'000'000, "Map file is too large.");
         }
         write32(out,static_cast<std::uint32_t>(grid.itemDefinitions().size()));
         for (const auto& [id,item] : grid.itemDefinitions()) { writeText(out,id); writeText(out,item.displayName); }
@@ -151,7 +154,7 @@ void saveDocument(const std::filesystem::path& file, const WorldDocument& grid, 
         }
         write32(out,static_cast<std::uint32_t>(state.used.size()));
         for(auto id:state.used) writeGuid(out,id);
-            if(!grid.resources.empty() || !grid.creatures.empty()) {
+            {
             write32(out,static_cast<std::uint32_t>(grid.resources.size()));
             for(const auto& [owner,resource]:grid.resources){
                 writeGuid(out,owner);write32(out,static_cast<std::uint32_t>(resource.pools().size()));
@@ -160,7 +163,7 @@ void saveDocument(const std::filesystem::path& file, const WorldDocument& grid, 
                 }
             }
         }
-        if (!grid.creatures.empty()) {
+        {
             write32(out, static_cast<std::uint32_t>(grid.creatures.size()));
             for (const auto &r : grid.creatures) {
                 writeGuid(out, r.id); writeText(out, r.type); write32(out, static_cast<std::uint32_t>(r.control));
@@ -168,6 +171,36 @@ void saveDocument(const std::filesystem::path& file, const WorldDocument& grid, 
                 write32(out, std::bit_cast<std::uint32_t>(r.position.worldPosition().y));
             }
         }
+        auto mappedCatalog=grid.creatureCatalog;
+        for(auto &[id,s]:mappedCatalog.species)if(!s.carcassHarvest.empty())s.carcassTile.tileset=used[s.carcassTile.tileset];
+        for(auto &[id,d]:mappedCatalog.harvestables)if(d.depletedTile.present())d.depletedTile.tileset=used[d.depletedTile.tileset];
+        const auto catalog=mappedCatalog.json().dump();
+        require(catalog.size()<=4*1024*1024,"Creature catalog too large.");
+        writeText(out,catalog);
+        for(const auto& r:grid.creatures) {
+            write32(out,static_cast<std::uint32_t>(r.species.species));
+            write32(out,static_cast<std::uint32_t>(r.species.subSpecies));write32(out,r.vocation.id);
+        }
+        for (const auto &r : grid.creatures) {
+            write32(out, static_cast<std::uint32_t>(r.inventory.size()));
+            for (const auto &item : r.inventory) {
+                writeGuid(out, item.guid);
+                writeText(out, item.definitionId); writeText(out, item.displayName);
+                write32(out, item.quantity);
+            }
+        }
+        write32(out,static_cast<std::uint32_t>(grid.harvestables.size()));
+        for (const auto &[id,h]:grid.harvestables) {
+            writeGuid(out,id);writeText(out,h.definitionId);
+            const auto timer=std::bit_cast<std::uint64_t>(h.regenerationRemaining);
+            write32(out,static_cast<std::uint32_t>(timer));write32(out,static_cast<std::uint32_t>(timer>>32));
+            write32(out,used[h.sourceTile.tileset]);write32(out,h.sourceTile.column);write32(out,h.sourceTile.row);
+        }
+        write32(out,static_cast<std::uint32_t>(grid.humanNames.size()));
+        for(const auto &[id,name]:grid.humanNames) {
+            writeGuid(out,id);writeText(out,name.first);writeText(out,name.last);
+        }
+        for(const auto &creature:grid.creatures)write32(out,static_cast<std::uint32_t>(creature.disposition));
         require(out.tellp() <= 400'000'000,"Map file is too large.");
         out.flush(); require(static_cast<bool>(out), "Map write failed; previous save preserved.");
         out.close(); require(!out.fail(), "Map close failed; previous save preserved.");
@@ -187,7 +220,7 @@ WorldDocument loadDocument(const std::filesystem::path& file, const std::vector<
     char magic[8]{}; in.read(magic, 8);
     require(std::string(magic, 8) == "JEVMAP01", "Not a JevSimulation map.");
     const auto version = read32(in);
-    require(version >= 1 && version <= 6, "Unsupported map version.");
+    require(version >= 1 && version <= 11, "Unsupported map version.");
     const auto width = read32(in), height = read32(in);
     const float size = std::bit_cast<float>(read32(in));
     const float x = std::bit_cast<float>(read32(in)), y = std::bit_cast<float>(read32(in));
@@ -330,6 +363,67 @@ WorldDocument loadDocument(const std::filesystem::path& file, const std::vector<
         }
         loaded.validateGuidState(loaded.guidState());
     }
+    if(version>=7) {
+        const auto bytes=read32(in);require(bytes>0 && bytes<=4*1024*1024,"Invalid creature catalog length.");
+        std::string text(bytes,'\0');in.read(text.data(),bytes);require(static_cast<bool>(in),"Truncated creature catalog.");
+        loaded.creatureCatalog=scene::CreatureCatalog::fromJson(nlohmann::json::parse(text));
+        if(version>=9)for(auto &[id,s]:loaded.creatureCatalog.species)if(!s.carcassHarvest.empty()) {
+            require(s.carcassTile.tileset>=0 && static_cast<std::size_t>(s.carcassTile.tileset)<remap.size(),"Invalid carcass tilesheet reference.");
+            s.carcassTile.tileset=remap[s.carcassTile.tileset];
+            require(s.carcassTile.column<sheets[s.carcassTile.tileset].columns && s.carcassTile.row<sheets[s.carcassTile.tileset].rows,"Invalid carcass sprite.");
+        }
+        if(version>=9)for(auto &[id,d]:loaded.creatureCatalog.harvestables)if(d.depletedTile.present()) {
+            require(static_cast<std::size_t>(d.depletedTile.tileset)<remap.size(),"Invalid depleted tilesheet reference.");
+            d.depletedTile.tileset=remap[d.depletedTile.tileset];
+            require(d.depletedTile.column<sheets[d.depletedTile.tileset].columns && d.depletedTile.row<sheets[d.depletedTile.tileset].rows,"Invalid depleted sprite.");
+        }
+        for(auto& r:loaded.creatures) {
+            r.species.species=static_cast<scene::Species>(read32(in));
+            r.species.subSpecies=static_cast<scene::SubSpecies>(read32(in));r.vocation.id=read32(in);
+            require(loaded.creatureCatalog.permits(r.species,r.vocation),"Invalid creature definition binding.");
+        }
+    }
+    if (version >= 8) {
+        std::size_t totalStacks = 0;
+        for (auto &r : loaded.creatures) {
+            const auto count = read32(in);
+            totalStacks += count;
+            require(count <= scene::Inventory::maxStacks && totalStacks <= SceneWorld::maxGuidHistory,
+                    "Too many inventory stacks.");
+            for (std::uint32_t i = 0; i < count; ++i) {
+                const auto guid = readGuid(in);
+                const auto definition = readText(in), name = readText(in);
+                const auto quantity = read32(in);
+                r.inventory.push_back({definition, name, quantity, guid});
+            }
+        }
+        loaded.validateGuidState(loaded.guidState());
+    }
+    if (version>=9) {
+        const auto count=read32(in);require(count<=loaded.objectCount(),"Too many harvestable owners.");
+        for (std::uint32_t i=0;i<count;++i) {
+            const auto id=readGuid(in);const auto key=readText(in);
+            const auto lo=read32(in),hi=read32(in);
+            const auto timer=std::bit_cast<double>(std::uint64_t(lo)|(std::uint64_t(hi)<<32));
+            const auto sheet=read32(in),col=read32(in),row=read32(in);
+            require(sheet<remap.size() && col<static_cast<std::uint32_t>(sheets[remap[sheet]].columns) && row<static_cast<std::uint32_t>(sheets[remap[sheet]].rows),"Invalid source tile.");
+            require(loaded.harvestables.emplace(id,scene::Harvestable{key,timer,{remap[sheet],static_cast<int>(col),static_cast<int>(row)}}).second,"Duplicate harvestable owner.");
+        }
+    }
+    if(version>=10) {
+        const auto count=read32(in);require(count<=SceneWorld::maxGuidHistory,"Too many human names.");
+        for(std::uint32_t i=0;i<count;++i) {
+            const auto id=readGuid(in);const auto first=readText(in),last=readText(in);
+            require(loaded.humanNames.emplace(id,scene::HumanName{first,last}).second,"Duplicate name owner.");
+        }
+    }
+    for(auto &creature:loaded.creatures) {
+        creature.disposition=version>=11?static_cast<scene::Disposition>(read32(in)):
+            loaded.creatureCatalog.species.at(static_cast<std::uint32_t>(creature.species.species)).defaultDisposition;
+        scene::dispositionName(creature.disposition);
+    }
+    loaded.validateHumanNames();
+    loaded.validateHarvestables();
     require(in.peek() == std::char_traits<char>::eof() && !in.bad(), "Unexpected data after map records.");
     return loaded;
 }

@@ -1,6 +1,7 @@
 #pragma once
 #include "WorldDocument.h"
 #include <memory>
+class EntityPresentation;
 class SceneWorld {
   public:
     explicit SceneWorld(int width = 2048, int height = 2048, float cellSize = 8.0f, Vector2 origin = {});
@@ -10,6 +11,20 @@ class SceneWorld {
     std::vector<Guid> objectsInChunk(CellPosition chunk) const;
     std::vector<Guid> creatureIds() const;
     std::uint64_t creatureMembershipRevision() const;
+    const scene::CreatureCatalog& creatureCatalog() const;
+    void setCreatureCatalog(scene::CreatureCatalog catalog);
+    void setCreatureIdentity(Guid id, scene::SpeciesComponent species, scene::VocationComponent vocation);
+    void setCreatureDisposition(Guid id, scene::Disposition disposition);
+    // Shared melee rules for player orders, local AI and Jev selections.
+    static constexpr float attackDamage=10;
+    static constexpr double attackSeconds=1;
+    struct AttackCheck { bool allowed=false; std::string reason; };
+    AttackCheck canAttack(Guid actor, Guid target, bool requireAdjacent=true) const;
+    AttackCheck attack(Guid actor, Guid target);
+    bool isEnemy(Guid actor, Guid target) const;
+    std::vector<CellPosition> attackPath(Guid actor, Guid target) const;
+    std::vector<Guid> nearbyCreatures(Guid actor, int radius) const;
+    Guid spawnCreature(CellPosition cell, scene::SpeciesComponent species, scene::VocationComponent vocation, ControlOwnership control);
     Guid spawnCreature(CellPosition cell, std::string type = "creature",
                        ControlOwnership control = ControlOwnership::AI,
                        scene::ResourcePool health = scene::ResourcePool{});
@@ -63,7 +78,20 @@ class SceneWorld {
     void removeResource(Guid id, const std::string &key);
     float adjustResource(Guid id, const std::string &key, float delta);
     bool trySpendResource(Guid id, const std::string &key, float amount);
+    std::optional<scene::Harvestable> harvestable(Guid id) const;
+    void setHarvestable(Guid id, const std::string &definitionId); // Explicit assignment/refill.
+    void removeHarvestable(Guid id);
+    scene::HarvestCheck canHarvest(Guid actor, Guid target, bool requireAdjacent = true) const;
+    scene::HarvestCheck completeHarvest(Guid actor, Guid target);
+    std::vector<CellPosition> harvestPath(Guid actor, Guid target) const;
+    std::vector<Guid> nearbyHarvestables(Guid actor, int radius) const;
+    // Converts a depleted creature with a configured carcass definition, preserving carried stacks.
+    std::optional<Guid> createCarcass(Guid creature);
     void setObjectOpen(Guid id, bool open);
+    // Creatures, containers and gatherables own inventories. Missing owners/doors return nullopt.
+    std::optional<std::vector<Item>> inventory(Guid id) const;
+    void updateInventory(Guid id, std::vector<Item> items);
+    // Add allocates a new stack identity; update preserves it. Stacks do not auto-merge.
     void addItem(Guid id, Item item);
     void updateItem(Guid id, std::size_t index, Item item);
     void removeItem(Guid id, std::size_t index);
@@ -79,14 +107,14 @@ class SceneWorld {
     std::vector<CellPosition> breadthFirstSearch(CellPosition start, CellPosition goal,
                                                  bool diagonals = false) const;
     // Cell-center supercover LOS: Walls/Entities/closed Doors (including touched corners) occlude.
-    bool hasLineOfSight(CellPosition start, CellPosition goal) const;
+    bool hasLineOfSight(CellPosition start, CellPosition goal, bool allowOccupiedEndpoints=false) const;
     std::optional<CellPosition> worldToCell(Vector2 world) const;
     Vector2 cellToWorld(CellPosition cell) const; // Top-left corner.
     Vector2 cellCenter(CellPosition cell) const;
     Rectangle cellBounds(CellPosition cell) const;
     Rectangle worldBounds() const;
     CellRange visibleRange(Rectangle worldView) const;
-    void draw(Rectangle worldView, const TilesetLibrary *tilesets = nullptr) const;
+    void draw(Rectangle worldView, const TilesetLibrary *tilesets = nullptr, const EntityPresentation *presentation = nullptr) const;
 
     ~SceneWorld();
     SceneWorld(SceneWorld &&) noexcept;
@@ -120,9 +148,13 @@ class SceneWorld {
     std::unique_ptr<Impl> impl_;
     void touchCreature(Guid id);
     void installCreature(const CreatureRecord &record, const scene::Resource &resources);
+    void installInventory(Guid owner, const std::vector<Item> &items);
     void eraseCreature(Guid id);
     void touch(CellPosition cell);
     void touchResources(Guid id);
+    void touchHarvestable(Guid id);
+    void advanceHarvestLifecycle(double seconds);
+    void collectGatherables();
     void install(CellPosition cell, const Object &object, TileRef tile);
     void eraseInstance(Guid id);
     void applyHistory(bool forward);

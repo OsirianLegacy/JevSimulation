@@ -16,8 +16,8 @@ struct Config {
     double requestsPerSecond = 10, timeout = 2, queueWait = 2, backoffMin = 1, backoffMax = 30;
     double moveStepSeconds = 0.25, waitSeconds = 1;
     unsigned seed = 12345;
-    bool trace = false;
-    std::string provider = "fake", proxyUrl = "http://127.0.0.1:8787/decision";
+    bool trace = false, managedProxy = true;
+    std::string provider = "proxy", proxyUrl = "http://127.0.0.1:8787/decision";
     std::array<Band,5> bands{{{0,1,8},{1,2,4},{3,5,2},{7,15,1},{2147483647,60,1}}};
     static Config load(const std::string &path);
     void validate() const;
@@ -31,6 +31,8 @@ struct GoalRecord {
 struct Execution {
     GoalRecord goal;
     double elapsed = 0;
+    double workElapsed = 0;
+    std::string harvestDefinition;
     int reroutes = 0;
     std::vector<CellPosition> path;
     std::size_t next = 1;
@@ -88,6 +90,7 @@ class DecisionSystem {
     DecisionSystem(SceneWorld &world, Config config, std::unique_ptr<Transport> transport = {});
     ~DecisionSystem();
     void update(double simulationDelta, double wallSeconds, bool paused = false);
+    void step(double simulationDelta); // Execute one paused step without network dispatch.
     void invalidate();
     bool assign(Guid entity, const std::string &action, Json parameters, std::string source = "fallback");
     void cancel(Guid entity, const std::string &reason = "interrupted");

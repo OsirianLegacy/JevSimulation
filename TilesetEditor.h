@@ -3,11 +3,13 @@
 #include "TilesetLibrary.h"
 #include "ObjectInspector.h"
 #include "CatalogEditor.h"
+#include "CreatureEditor.h"
+#include "HarvestEditor.h"
 #include <utility>
 
 enum class MapAction { None, Save, Load };
 enum class TransportAction { None, Play, Pause, Step, Stop };
-enum class EditorMode { Tiles, Items, ObjectTypes };
+enum class EditorMode { Tiles, Items, ObjectTypes, Creatures, Harvestables };
 
 // Explicit input keeps editor interactions testable without synthesizing OS input.
 struct EditorInput {
@@ -25,14 +27,14 @@ struct EditorInput {
 
 class TilesetEditor {
 public:
-    explicit TilesetEditor(const TilesetLibrary& tilesets, bool open=false) : tilesets_(tilesets), open_(open) {}
+    explicit TilesetEditor(const TilesetLibrary& tilesets, bool open=false) : tilesets_(tilesets), open_(open), creatureEditor_(tilesets.assetsDirectory()) {}
     void update(SceneWorld& grid, const Camera2D& camera, const EditorInput& input, int screenHeight);
     void draw(int screenHeight) const;
     void drawBrush(const SceneWorld& grid, const Camera2D& camera, Vector2 mouse) const;
     bool capturesMouse(Vector2 mouse) const;
     bool capturesKeyboard() const { return open_ && (mode_ != EditorMode::Tiles || (inspect_ && inspector_.capturesKeyboard())); }
-    bool textInputActive() const {return open_ && (mode_!=EditorMode::Tiles?catalogEditor_.capturesKeyboard():inspect_ && inspector_.capturesKeyboard());}
-    void clearSelection() { inspector_.clear(); catalogEditor_.reset(); objectTypeId_.clear(); customTypesOpen_=false; }
+    bool textInputActive() const {return open_ && (mode_==EditorMode::Harvestables?harvestEditor_.capturesKeyboard():mode_==EditorMode::Creatures?creatureEditor_.capturesKeyboard():mode_!=EditorMode::Tiles?catalogEditor_.capturesKeyboard():inspect_ && inspector_.capturesKeyboard());}
+    void clearSelection() { inspector_.clear(); catalogEditor_.reset(); creatureEditor_.reset(); objectTypeId_.clear(); harvestBrush_.clear(); customTypesOpen_=false; }
     EditorMode mode() const { return mode_; }
     bool visible() const { return open_; }
     GridLayer layer() const { return layer_; }
@@ -58,10 +60,15 @@ private:
     MapAction mapAction_ = MapAction::None;
     ObjectType objectType_ = ObjectType::Container;
     bool inspect_ = false;
+    ControlOwnership creatureControl_ = ControlOwnership::AI;
     EditorMode mode_ = EditorMode::Tiles;
     CatalogEditor catalogEditor_;
+    CreatureEditor creatureEditor_;
+    HarvestEditor harvestEditor_;
+    scene::SpeciesComponent creatureSpecies_;
+    scene::VocationComponent creatureVocation_;
     const SceneWorld* grid_ = nullptr;
-    std::string objectTypeId_;
+    std::string objectTypeId_, harvestBrush_;
     bool customTypesOpen_ = false;
     int customTypeOffset_ = 0;
     ObjectInspector inspector_;

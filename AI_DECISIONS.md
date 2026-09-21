@@ -5,6 +5,9 @@ Creature type/control, and persistent identity components. `Entity` is a value
 snapshot. Chunk indexes contain IDs only, never duplicate live component data.
 Jev chooses a candidate; the game owns execution and records the outcome.
 
+See [Combat and disposition](COMBAT.md) for the shared attack action, species
+defaults, local combat decisions, and nearby entity information supplied to Jev.
+
 ## Run
 
 Build `JevSimulation`, then use:
@@ -22,18 +25,63 @@ invalidates the decision session. The demo never overwrites your map.
 60 seconds of simulated time. It reports world-cloning time, Windows private
 memory, and decision counters. It has no window or network requirement.
 
-Normal `--game` and editor Play also run AI for saved AI-controlled creatures.
-Authoring mode does not execute goals. Spawn creatures through the world API;
-creature-painting controls are not part of this MVP. Existing item/object tools
-remain available. Successful map replacement and Stop discard the decision
-session; Pause cancels pending remote work and freezes execution.
+Normal `--game` and editor Play run live Jev for AI-controlled creatures. Open
+the editor's Entities tab, choose Jev AI or Player, and left-click walkable ground
+to place a creature. Right-click removes one. Placement supports undo/redo and
+map saving. Press Play to start decisions; authoring mode does not execute goals.
+In Play/game mode, click a blue Player creature and use arrow keys to move it.
+Human creatures initially loop the first three idle frames from `Units.png`,
+with blue units for players and red units for AI. Species choose Units, Animals,
+or Monsters; vocation mappings choose frames within that species' sheet. Cell hover uses the three
+white frames in `Assets/UI/Interface.png`. Pause Play (or press Space in `--game`
+and the demo), then hover a creature to see its type and Health. Current hitpoints
+are centered inside the bar. `Resource::draw` draws the fill beneath the supplied
+UI frame; the component holds no textures. Resource colors are red
+Health, green Stamina, blue Mana/Thirst, gold Hunger, and purple custom pools.
+These colors do not add unimplemented resources or Needs.
+The HUD shows request, queue, fallback, and failure counts. Successful map
+replacement and Stop discard the decision session; Pause cancels pending remote
+work and freezes execution. Step advances existing goals without dispatching
+network requests. Stop discards runtime changes.
 
 ## Configuration and proxy
+
+### Creature definition editors
+
+Open **Entities > Species / Vocation Editors**. These are authoring tools; Play
+uses a snapshot of the saved definitions. **Prev/Next** browse definitions and
+**New definition** allocates a stable enumeration ID. Human is species 0; every
+species includes a Default subspecies. Add named subspecies in the Species editor.
+
+- Species: choose the sheet, check resource pools, and use resource key/capacity
+  fields to add custom pools or edit maxima. Health is required. Checkboxes for
+  Thirst/Reproduction only configure pools; no Needs behavior is implemented yet.
+- Vocations: create a named vocation and check each species that may use it.
+  Click a species name to edit its individual mapping. Unassigned requires no
+  vocation and uses the species' default frames.
+- Sprite picker: choose AI row or Player row, then click the first 8x8 frame in
+  the sheet. Both use the same starting column and frame count; rows may differ.
+  Adjust frame count/FPS with minus/plus. Wheel scrolls vertically; Shift+wheel
+  scrolls horizontally. Apply rejects mappings outside the selected sheet.
+- **Apply + Save map** commits the complete draft and requests a map save.
+  **Discard / Reload** restores current world definitions. Applied edits support
+  undo/redo; a draft is not applied merely by switching editor tabs.
+- Back under Tile Painting > Entities, click Species/Subspecies/Vocation to
+  cycle valid choices. Left-click places a creature; Shift-click assigns these
+  choices to an existing creature. Right-click removes one.
+
+Definition changes reconcile existing creatures' resources: retained amounts
+are clamped to new maxima, added pools start full, removed optional pools are
+removed. Assignments that would invalidate existing creatures are rejected.
+IDs are persisted numeric enumeration values, so additions need no C++ rebuild.
+SpeciesComponent and VocationComponent are owned by Flecs, with snapshot copies
+on Entity. New maps use version 7 for definitions and assignments; versions 1-6
+still load with Human/Default/Unassigned. Goals and networking remain transient.
 
 `ai-config.json` is versioned and loaded at session startup. Pass
 `--ai-config path.json` to select another file. No hot reload is performed.
 
-- `provider`: `fake` (in-process deterministic first-candidate selection), `proxy`,
+- `provider`: `proxy` (default, live Jev), `fake` (deterministic first-candidate selection),
   or `fallback-only` (seeded local selection).
 - `bands`: five inclusive maximum chunk distances, minimum remote-decision
   intervals in simulation seconds, and service weights. The final distance is
@@ -52,28 +100,33 @@ session; Pause cancels pending remote work and freezes execution.
 - `moveStepSeconds`, `waitSeconds`, `rerouteAttempts`: 0.25, 1, and 2.
 - `seed`: controls candidate and fallback randomness for a fixed world/ID order.
 - `trace`: opt-in request/goal tracing to stderr, without credentials.
+- `managedProxy`: true by default; the bridge starts and owns a persistent proxy
+  on an available loopback port. No separate terminal is required. Set false to
+  connect to a manually started proxy at `proxyUrl`.
+- `proxy.mode`: `live` by default; `fake` exercises the complete transport offline.
 - `proxy.port`, `proxy.maxConcurrency`, `proxy.requestsPerSecond`: local server
   defaults 8787, 8, and 40. These cap aggregate traffic across world sessions.
 
-To exercise the actual bridge without contacting Jev, set `provider` to `proxy`
-and start this in a separate terminal:
+To exercise the actual bridge without contacting Jev, set `proxy.mode` to `fake`.
+For an externally managed proxy, set `managedProxy` to false and start:
 
 ```powershell
 node scripts/decision-proxy.mjs
 ```
 
-The proxy binds only to 127.0.0.1. It defaults to a fake provider even when a key
-exists. Live service requires explicit opt-in:
+The proxy binds only to 127.0.0.1 and defaults to live Jev. To override its mode
+for an offline transport test:
 
 ```powershell
-node scripts/decision-proxy.mjs --live
+node scripts/decision-proxy.mjs --fake
 ```
 
 Only that server loads `AI_GATEWAY_API_KEY` (or legacy `API_KEY`) from its
 environment / local env files. The client bridge never reads those files or
 transmits the provider key to the proxy. Use `--config path.json` on the proxy to
-select its settings. Keep the client's `proxyUrl` port consistent with the proxy
-port. Public hosting and authentication are intentionally not implemented.
+select its settings. In externally managed mode, keep the client's `proxyUrl`
+port consistent with the proxy port. Managed proxies use ephemeral ports and
+shut down with their bridge. Public hosting and authentication are not implemented.
 
 Normal application startup no longer sends the old smoke-test inquiry. The
 standalone live diagnostic is `--jev-smoke-test`; `--dry-run` and window smoke
@@ -100,9 +153,9 @@ short AI paths; exhausting that budget counts as unreachable. `reachableCells`
 uses a bounded four-way breadth-first search up to the perception budget. These
 helpers do not change the existing generic navigation algorithms.
 
-Creature-bearing maps write version 6: the version-5 resource section plus
-creature ID, type, control, and world coordinates. Health remains in the common
-resource section. Existing versions 1-5 and their original dimensions still load;
+Maps write version 7: resources, creature identity/control/position, creature
+catalogs, and species/subspecies/vocation assignments. Health remains in the common
+resource section. Existing versions 1-6 and their original dimensions still load;
 new-world defaults do not resize existing saves. Used GUID history covers
 creatures, and load rebuilds spatial indexes. Terrain, creatures, and resources
 participate in undo/redo and Play cloning. Goals, paths, request queues, and
@@ -116,12 +169,12 @@ component contributors. It does not parse or concatenate debug `fetchData()`
 strings. The initial contributors are Health and Position, plus Range rules.
 
 Requests carry version, world-session ID, request ID, entity decision revision,
-self state, range, shared rules, latest outcome, and up to four candidate goals.
+self state, range, nearby entity dispositions/health/positions, shared rules, latest outcome, and up to four candidate goals.
 Candidate IDs are local to the request. The C++ decision system retains the
-entity mapping. A candidate is Move with a destination/path-step estimate or
-Wait with a duration. Movement candidates are reachable within the perception
+entity mapping. Candidates include Attack and Harvest with a target GUID, Move
+with a destination/path-step estimate, and Wait with a duration. Movement candidates are reachable within the perception
 step budget; no full terrain map or path is transmitted. Oversized requests
-lose extra candidates first, retaining Wait and required rules. If required
+shorten the nearby entity list, then remove extra candidates, retaining Wait and required rules. If required
 context alone exceeds the cap, the system safely uses local Wait.
 
 The proxy submits one boolean suitability question per candidate using the
@@ -186,4 +239,7 @@ crowding produced legitimate unreachable-goal results, exercising recovery.
 
 All 16 CTest cases passed, including the C++/Node/proxy integration. Both the AI
 demo and existing editor Play/Pause/Step/Stop hidden-window smoke checks passed.
-No live provider request was made during implementation or verification.
+The main executable integration also passed entity placement/undo/redo and
+Play/Pause/Step/Stop checks. Two live Jev decisions passed through the same C++
+transport and automatically managed proxy used by the main executable; observed
+provider latency was 644 ms on the first request and 217 ms on the second.

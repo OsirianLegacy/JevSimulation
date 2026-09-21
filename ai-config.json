@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "provider": "fake",
+  "provider": "proxy",
   "proxyUrl": "http://127.0.0.1:8787/decision",
   "seed": 12345,
   "bands": [
@@ -45,7 +45,9 @@
   "proxy": {
     "port": 8787,
     "maxConcurrency": 8,
-    "requestsPerSecond": 40
+    "requestsPerSecond": 40,
+    "mode": "live"
   },
-  "trace": false
+  "trace": false,
+  "managedProxy": true
 }

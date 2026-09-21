@@ -37,7 +37,7 @@ int main(int argc, char* argv[]) {
         grid.paint({999, 999}, GridLayer::Ground, {0, 23, 92});
         saveMap(file, grid, catalog);
         const auto original = bytes(file);
-        check(original.size() < 1024, "Sparse map must not serialize a million empty cells.");
+        check(original.size() < 1024+grid.creatureCatalog().json().dump().size(), "Sparse map must not serialize a million empty cells.");
         auto loaded = loadMap(file, catalog);
         check(loaded.width() == 1000 && loaded.height() == 1000 && loaded.cellSize() == 8 &&
               loaded.worldBounds().x == -8 && loaded.worldBounds().y == 16, "Geometry round trip.");
@@ -81,7 +81,7 @@ int main(int argc, char* argv[]) {
         saveMap(file, grid, catalog); // Replace an existing file, including on Windows.
         check(loadMap(file, catalog).isWalkable({1, 1}), "Overwrite save did not replace map.");
         grid.clear(); saveMap(file, grid, catalog);
-        check(bytes(file).size() == 72+grid.guidState().used.size()*16 && !loadMap(file, {}).isWalkable({0, 0}), "Cleared map preserves retired GUID history.");
+        check(bytes(file).size() == 92+grid.guidState().used.size()*16+grid.creatureCatalog().json().dump().size() && !loadMap(file, {}).isWalkable({0, 0}), "Cleared map preserves retired GUID history and creature definitions.");
         const auto blocked = directory / "directory-not-file";
         std::filesystem::create_directory(blocked);
         rejects([&] { saveMap(blocked, grid, catalog); });

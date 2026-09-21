@@ -16,8 +16,11 @@ float remainingHealth = wolf.health().current(); // 65
 
 Type keys identify future component compositions without requiring inheritance
 per species. World placement, Flecs ownership, chunk indexing, creature serialization, and
-undo/redo are now supported through SceneWorld. Creature type catalogs and
-creature-specific editor controls remain future work. Depleted health
+undo/redo are supported through SceneWorld. Species/Subspecies and Vocation
+components are automatically attached; Human/Default/Unassigned are the defaults.
+Editable catalogs assign sprite sheets, idle frames, allowed species per vocation,
+and resource capacities per species. Use the Entities panel's Species / Vocation
+Editors; definitions and assignments save with the map. Depleted health
 does not automatically destroy an entity.
 
 ## Component data for Jev
@@ -90,3 +93,12 @@ a stale center after movement. Independent Range instances can later support
 sight, hearing, weapons, and movement with different radii; none is automatically
 assigned to Entity yet. Range alone does not evaluate obstacles, line of sight,
 sound, pathfinding, or terrain contents, and it does not change navigation costs.
+
+Human species (ID 0) receive a random first and last name when placed/spawned or
+when migrated from an older map. Names are separate from species/type labels and
+appear in the paused tooltip and inspection data. Full combinations are unique
+within a world, including retired entities: deletion, death and undo never release
+a reservation. Save format v10 persists reservations and Play copies retain them.
+Nonhuman species have no human name. Changing species away and back restores the
+original name. If all 1,024 base combinations are used, compound surname variants
+keep generation bounded and unique.

@@ -12,6 +12,7 @@ struct Guid {
     bool operator==(const Guid&) const = default;
     static Guid generate(); // Compatibility wrapper for GenerateUniqueGuid().
     std::string toString() const;
+    static Guid fromString(const std::string &text);
 };
 struct GuidHash {
     std::size_t operator()(const Guid& id) const noexcept {

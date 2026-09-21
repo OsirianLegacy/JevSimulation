@@ -9,10 +9,15 @@ struct CreatureRecord {
     std::string type;
     ControlOwnership control = ControlOwnership::AI;
     scene::Position position;
+    scene::SpeciesComponent species;
+    scene::VocationComponent vocation;
+    std::vector<Item> inventory;
+    scene::Disposition disposition=scene::Disposition::Neutral;
     bool operator==(const CreatureRecord &) const = default;
 };
 struct GuidState {
     std::map<std::string, Guid> items, types;
+    // Legacy object-stack identity table. Creature stack IDs live in CreatureRecord::inventory.
     std::unordered_map<Guid, std::vector<Guid>, GuidHash> contents;
     std::unordered_set<Guid, GuidHash> used;
 };
@@ -59,10 +64,16 @@ class WorldDocument {
         return objectTypes_;
     }
     std::vector<CreatureRecord> creatures;
+    // Lifetime reservations: retain names after death, deletion and undo.
+    std::unordered_map<Guid,scene::HumanName,GuidHash> humanNames;
+    void validateHumanNames() const;
+    scene::CreatureCatalog creatureCatalog;
     // Optional extension records, keyed by persistent instance identity.
     std::unordered_map<Guid, scene::Resource, GuidHash> resources;
+    std::unordered_map<Guid, scene::Harvestable, GuidHash> harvestables;
     GuidState guidState() const;
     void validateGuidState(const GuidState &) const;
+    void validateHarvestables() const;
     void restoreGuidState(GuidState);
     static constexpr std::size_t maxDefinitions = 4096, maxGuidHistory = 4'000'000;
 

@@ -22,7 +22,6 @@ struct ContainerState {
     bool open = false;
 };
 struct Gatherable {};
-struct Inventory {};
 struct PlacedObject {};
 struct Creature { std::string type; ControlOwnership control = ControlOwnership::AI; };
 struct ContainedBy {};
@@ -60,6 +59,10 @@ struct ComponentSchema {
 };
 // The curated inspector's single registration point. Identity/composition are read-only.
 inline std::vector<ComponentSchema> registerComponents(flecs::world &ecs) {
+    ecs.component<HumanName>().add(flecs::OnInstantiate, flecs::DontInherit);
+    ecs.component<SpeciesComponent>().add(flecs::OnInstantiate, flecs::DontInherit);
+    ecs.component<DispositionComponent>().add(flecs::OnInstantiate, flecs::DontInherit);
+    ecs.component<VocationComponent>().add(flecs::OnInstantiate, flecs::DontInherit);
     ecs.component<Position>().add(flecs::OnInstantiate, flecs::DontInherit);
     ecs.component<Creature>().add(flecs::OnInstantiate, flecs::DontInherit);
     ecs.component<Resource>().add(flecs::OnInstantiate, flecs::Override);
@@ -67,10 +70,24 @@ inline std::vector<ComponentSchema> registerComponents(flecs::world &ecs) {
     ecs.component<GridPosition>().add(flecs::OnInstantiate, flecs::DontInherit);
     ecs.component<TileSprite>().add(flecs::OnInstantiate, flecs::DontInherit);
     ecs.component<ItemStack>().add(flecs::OnInstantiate, flecs::DontInherit);
+    ecs.component<Inventory>().add(flecs::OnInstantiate, flecs::DontInherit);
+    ecs.component<Harvestable>().add(flecs::OnInstantiate, flecs::Override);
     ecs.component<DoorState>().member<bool>("open");
     ecs.component<ContainerState>().member<bool>("open");
     ecs.component<ContainedBy>().add(flecs::Exclusive).add(flecs::OnDeleteTarget, flecs::Delete);
     return {
+        {ecs.id<DispositionComponent>(), "Disposition", {{"state", "enum", false,
+            [](flecs::entity e) {return std::string(dispositionName(e.get<DispositionComponent>().value));}}}},
+        {ecs.id<HumanName>(), "Human name", {
+            {"first", "text", false, [](flecs::entity e) { return e.get<HumanName>().first; }},
+            {"last", "text", false, [](flecs::entity e) { return e.get<HumanName>().last; }}
+        }},
+        {ecs.id<Harvestable>(), "Harvestable", {
+            {"definition", "text", false, [](flecs::entity e) { return e.get<Harvestable>().definitionId; }},
+            {"regeneration seconds", "number", false, [](flecs::entity e) { return std::to_string(e.get<Harvestable>().regenerationRemaining); }}
+        }},
+        {ecs.id<SpeciesComponent>(), "Species", {{"species / subspecies", "enum", false, [](flecs::entity e) {const auto s=e.get<SpeciesComponent>();return std::to_string(static_cast<std::uint32_t>(s.species))+" / "+std::to_string(static_cast<std::uint32_t>(s.subSpecies));}}}},
+        {ecs.id<VocationComponent>(), "Vocation", {{"vocation", "enum", false, [](flecs::entity e) {return std::to_string(e.get<VocationComponent>().id);}}}},
         {ecs.id<Position>(), "Position", {{"location", "json", false, [](flecs::entity e) { return e.get<Position>().fetchData(); }}}},
         {ecs.id<Creature>(), "Creature", {{"type", "text", false, [](flecs::entity e) { return e.get<Creature>().type; }}}},
         {ecs.id<Resource>(),

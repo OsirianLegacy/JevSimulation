@@ -2,6 +2,8 @@
 #include "WorldCamera.h"
 #include "NodeConfig.h"
 #include "PlaySession.h"
+#include "EntityPresentation.h"
+#include "PlayerController.h"
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -24,7 +26,7 @@ int main(int argc, char* argv[]) {
         }
         check(walls >= 0 && structures >= 0, "Required tilesheets.");
         check(!library.valid({0, 24, 0}) && !library.valid({-1, 0, 0}), "Atlas bounds validation.");
-        SceneWorld grid;
+        SceneWorld grid(1000,1000);
         WorldCamera camera(grid.worldBounds());
         camera.setZoom(3);
         camera.resize(1100, 700);
@@ -72,7 +74,20 @@ int main(int argc, char* argv[]) {
         click(screenA, true); release();
         check(!grid.isWalkable(a) && !grid.blocksSight(a), "Erasing ground does not block vision.");
         click({240, 155}); release();
-        check(editor.layer() == GridLayer::Ground, "Reserved entity tab cannot activate painting.");
+        check(editor.layer() == GridLayer::Entities, "Entity tab activates creature placement.");
+        grid.paint(a,GridLayer::Ground,{0,0,0});
+        grid.setHistoryEnabled(true);
+        click(screenA); release();
+        auto creature=grid.creatureAt(a);
+        check(creature && grid.findCreature(*creature)->control()==ControlOwnership::AI,"Editor places AI creature");
+        check(grid.undo() && !grid.creatureAt(a),"Creature placement undo");
+        check(grid.redo() && grid.creatureAt(a)==creature,"Creature placement redo");
+        click(screenA,true); release();
+        check(!grid.creatureAt(a),"Editor removes creature");
+        click({240,188}); release(); click(screenA); release();
+        check(grid.findCreature(*grid.creatureAt(a))->control()==ControlOwnership::Player,"Editor places player creature");
+        click(screenA,true); release(); click({80,122}); release();
+        grid.setHistoryEnabled(false);
 
         chooseSheet(structures);
         // Scroll to both far edges using the draggable tracks, then select the last tile.
@@ -322,6 +337,133 @@ int main(int argc, char* argv[]) {
         ecsClick({100,386});check(ecsEditor.capturesKeyboard(),"Inspector text field captures keyboard");
         EditorInput typingUndo;typingUndo.undo=true;ecsUpdate(typingUndo);
         check(authored.findObject(chestForText)->contents().size()==1,"Focused text ignores world undo shortcut");
+        {
+            EntityPresentation presentation(std::filesystem::path(JevProjectDirectory)/"Assets");
+            SceneWorld creatures(8,8); GridCell floor; floor.tile(GridLayer::Ground)={0,0,0};
+            creatures.fillRegion({0,0,8,8},floor);
+            const auto id=creatures.spawnCreature({2,2},"wanderer",ControlOwnership::AI,scene::ResourcePool(100,65));
+            creatures.addItem(id,{"wood","Wood",12});
+            creatures.addItem(id,{"stone","Stone",3});
+            creatures.addItem(id,{"berries","Berries",8});
+            ai::Config config; config.provider="fake";
+            ai::DecisionSystem decisions(creatures,config);
+            decisions.assign(id,"wait",{{"seconds",1}},"jev");
+            auto data=EntityPresentation::inspectionData(*creatures.findCreature(id),&decisions,8);
+            check(data.at("id")==id.toString() && data.at("resources").at("pools").at("health").at("current")==65,"Inspection preserves current components");
+            check(data.at("currentGoal").at("action")=="wait" && data.contains("latestOutcome"),"Inspection includes AI goals");
+            const auto red=scene::Resource::drawColor("health");check(red.r>red.g && red.r>red.b,"Health is red");
+            const auto render=[&](bool paused) {
+                BeginDrawing(); ClearBackground(BLACK);
+                presentation.drawCreature({160,220},64,ControlOwnership::AI,0);
+                presentation.drawCreature({80,220},64,ControlOwnership::Player,0);
+                presentation.drawHover({128,188,64,64},0.2);
+                presentation.drawTooltip(creatures,CellPosition{2,2},paused,{180,230});
+                EndDrawing();
+            };
+            render(false);render(false);auto running=LoadImageFromScreen();
+            render(true);render(true);auto paused=LoadImageFromScreen();
+            check(GetImageColor(running,210,260).r==0 && GetImageColor(paused,210,260).r!=0,"Tooltip is hidden while running and visible paused");
+            if(argc>1) check(ExportImage(paused,(std::string(argv[1])+".entity-tooltip.png").c_str()),"Entity tooltip capture");
+            UnloadImage(running);UnloadImage(paused);
+            creatures.addItem(id,{"hide","Hide",1});creatures.addItem(id,{"ore","Ore",10});
+            creatures.addItem(id,{"branches","Branches",4'294'967'295u});
+            check(creatures.inventory(id)->size()==6,"All tooltip inventory slots can be occupied");
+            render(true);render(true);
+            if(argc>1){auto shot=LoadImageFromScreen();check(ExportImage(shot,(std::string(argv[1])+".inventory-full.png").c_str()),"Full inventory tooltip capture");UnloadImage(shot);}
+
+        }
+        {
+            SceneWorld definitions(8,8);definitions.setHistoryEnabled(true);
+            TilesetEditor creatureEditor(library,true);
+            auto updateDefinitions=[&](EditorInput input){creatureEditor.update(definitions,Camera2D{},input,600);};
+            auto clickDefinitions=[&](Vector2 p){EditorInput input;input.mouse=p;input.leftPressed=true;updateDefinitions(input);updateDefinitions({});};
+            clickDefinitions({250,155});clickDefinitions({100,435});
+            check(creatureEditor.mode()==EditorMode::Creatures,"Entities opens creature definition editors");
+            EditorInput scroll;scroll.mouse={440,150};scroll.wheel.y=-3;updateDefinitions(scroll);
+            clickDefinitions({402,248});clickDefinitions({100,535});
+            check(definitions.creatureCatalog().species.at(0).resources.contains("thirst"),"Species resource checkbox applies");
+            check(creatureEditor.takeMapAction()==MapAction::Save,"Definition apply requests map save");
+            clickDefinitions({240,142});clickDefinitions({40,325});EditorInput text;text.text="Walker";updateDefinitions(text);clickDefinitions({290,325});clickDefinitions({100,535});
+            check(definitions.creatureCatalog().species.at(1).subSpecies.at(1)=="Walker","Species editor creates subspecies");
+            clickDefinitions({240,102});clickDefinitions({240,142});clickDefinitions({402,165});clickDefinitions({100,535});
+            check(definitions.creatureCatalog().vocations.at(1).species.contains(1) && !definitions.creatureCatalog().vocations.at(1).species.contains(0),"Vocation checkboxes restrict species");
+            clickDefinitions({640,290});clickDefinitions({500,464});clickDefinitions({100,535});
+            check(definitions.creatureCatalog().vocations.at(1).species.at(1).count==2 && definitions.creatureCatalog().vocations.at(1).species.at(1).column==4,"Sprite picker and frame count apply to vocation mapping");
+            for(int n=0;n<2;++n){BeginDrawing();ClearBackground(BLACK);creatureEditor.draw(600);EndDrawing();}
+            if(argc>1){auto shot=LoadImageFromScreen();check(ExportImage(shot,(std::string(argv[1])+".vocations.png").c_str()),"Vocation editor capture");UnloadImage(shot);}
+            clickDefinitions({80,102});
+            for(int n=0;n<2;++n){BeginDrawing();ClearBackground(BLACK);creatureEditor.draw(600);EndDrawing();}
+            if(argc>1){auto shot=LoadImageFromScreen();check(ExportImage(shot,(std::string(argv[1])+".species.png").c_str()),"Species editor capture");UnloadImage(shot);}
+        }
+        {
+            SceneWorld harvestWorld(4,4);harvestWorld.setHistoryEnabled(true);
+            HarvestEditor harvestEditor;
+            harvestEditor.update(harvestWorld,{},600,{0,0,0});
+            const auto click=[&](Vector2 p){EditorInput in;in.leftPressed=true;in.mouse=p;return harvestEditor.update(harvestWorld,in,600,{0,0,0});};
+            click({620,100}); // Copy recipe to a new key.
+            check(click({100,532}) && harvestWorld.creatureCatalog().harvestables.contains("new_source"),"Harvest editor creates definition");
+            check(click({450,466}) && harvestWorld.creatureCatalog().species.at(0).carcassHarvest=="new_source","Species carcass assignment");
+            check(harvestWorld.undo() && harvestWorld.creatureCatalog().species.at(0).carcassHarvest.empty(),"Carcass assignment undo");
+            for(int n=0;n<2;++n){BeginDrawing();ClearBackground(BLACK);harvestEditor.draw(harvestWorld,600);EndDrawing();}
+            if(argc>1){auto shot=LoadImageFromScreen();check(ExportImage(shot,(std::string(argv[1])+".harvest.png").c_str()),"Harvest editor capture");UnloadImage(shot);}
+            const auto node=harvestWorld.placeObject({1,1},{0,0,0},ObjectType::Gatherable);
+            ObjectInspector inspect;inspect.select(harvestWorld,{1,1});
+            EditorInput wheel;wheel.mouse={100,300};wheel.wheel.y=-5;inspect.update(harvestWorld,wheel,600);
+            // Scroll clamps to 36px: harvest selector is at 348px with no stored stacks.
+            EditorInput choose;choose.mouse={100,358};choose.leftPressed=true;inspect.update(harvestWorld,choose,600);
+            EditorInput apply;apply.mouse={80,442};apply.leftPressed=true;inspect.update(harvestWorld,apply,600);
+            check(harvestWorld.harvestable(node).has_value(),"Inspector assigns a harvest recipe");
+            const auto h=harvestWorld.harvestable(node);
+            inspect.update(harvestWorld,apply,600);
+            check(harvestWorld.harvestable(node)==h,"Unchanged inspector apply retains harvest state");
+        }
+        {
+            SceneWorld world(24,16);GridCell floor;floor.tile(GridLayer::Ground)={0,0,0};world.fill(floor);
+            world.spawnCreature({3,3},"Player A",ControlOwnership::Player);
+            world.spawnCreature({6,3},"Player B",ControlOwnership::Player);
+            world.spawnCreature({4,6},"Player C",ControlOwnership::Player);
+            world.spawnCreature({7,6},"NPC");
+            Camera2D camera{{50,50},{0,0},0,4};
+            ai::Config config;config.provider="fallback-only";
+            ai::DecisionSystem decisions(world,config);PlayerController controls;
+            PlayerInput in;in.mouse={140,140};in.leftPressed=in.leftDown=true;
+            controls.update(world,decisions,camera,in,0.01f);
+            in.leftPressed=false;in.mouse={310,290};controls.update(world,decisions,camera,in,0.01f);
+            check(controls.dragging(),"RTS marquee is visible while held");
+            EntityPresentation units(std::filesystem::path(JevProjectDirectory)/"Assets");
+            const auto render=[&]{BeginDrawing();ClearBackground({22,26,34,255});BeginMode2D(camera);
+                world.draw({0,0,192,128},&library,&units);controls.drawWorld(world,camera,decisions);EndMode2D();
+                controls.drawScreen(camera);DrawText("RTS selection and orders",18,18,20,RAYWHITE);EndDrawing();};
+            render();render();
+            if(argc>1){auto shot=LoadImageFromScreen();check(ExportImage(shot,(std::string(argv[1])+".rts-drag.png").c_str()),"RTS marquee capture");UnloadImage(shot);}
+            in.leftDown=false;in.leftReleased=true;controls.update(world,decisions,camera,in,0.01f);
+            check(controls.selection().size()==3,"RTS renderer selects players only");
+            in.leftReleased=false;in.rightPressed=true;in.mouse=GetWorldToScreen2D(world.cellCenter({16,9}),camera);
+            controls.update(world,decisions,camera,in,0.01f);render();render();
+            if(argc>1){auto shot=LoadImageFromScreen();check(ExportImage(shot,(std::string(argv[1])+".rts-orders.png").c_str()),"RTS order marker capture");UnloadImage(shot);}
+        }
+        {
+            SetWindowSize(1100,700);
+            SceneWorld placement(24,18);GridCell ground;ground.tile(GridLayer::Ground)={0,0,0};placement.fill(ground);placement.setHistoryEnabled(true);
+            Camera2D camera{{380,90},{0,0},0,3};TilesetEditor paint(library,true);
+            auto click=[&](Vector2 point){EditorInput input;input.mouse=point;input.leftPressed=input.leftDown=true;paint.update(placement,camera,input,700);paint.update(placement,camera,{},700);};
+            click({940,20});paint.update(placement,camera,{},700);
+            check(paint.mode()==EditorMode::Harvestables,"Open harvest definitions");
+            click({790,100});
+            check(paint.mode()==EditorMode::Tiles && paint.layer()==GridLayer::Objects,"Place in level enters object painting");
+            click(GetWorldToScreen2D(placement.cellCenter({5,5}),camera));
+            const auto node=placement.objectAt({5,5});
+            check(node && placement.harvestable(node->id())->definitionId=="tree","Placement attaches selected harvest definition");
+            check(placement.resource(node->id(),scene::Resource::Health)->full(),"Placed harvestable has health");
+            check(placement.undo() && !placement.objectAt({5,5}),"Placement undo is atomic");
+            check(placement.redo() && placement.harvestable(node->id()).has_value(),"Placement redo restores component");
+            for(int n=0;n<2;++n){BeginDrawing();ClearBackground(BLACK);BeginMode2D(camera);placement.draw(placement.worldBounds(),&library);EndMode2D();paint.draw(700);EndDrawing();}
+            if(argc>1){auto shot=LoadImageFromScreen();check(ExportImage(shot,(std::string(argv[1])+".placement.png").c_str()),"Placement UI capture");UnloadImage(shot);}
+            const auto worker=placement.spawnCreature({4,5},"Worker",ControlOwnership::Player);
+            placement.completeHarvest(worker,node->id());placement.completeHarvest(worker,node->id());
+            for(int n=0;n<2;++n){BeginDrawing();ClearBackground(BLACK);BeginMode2D(camera);placement.draw(placement.worldBounds(),&library);EndMode2D();paint.draw(700);EndDrawing();}
+            if(argc>1){auto shot=LoadImageFromScreen();check(ExportImage(shot,(std::string(argv[1])+".drops.png").c_str()),"Drop and health bar capture");UnloadImage(shot);}
+        }
         std::cout << "Tileset editor interaction and rendering tests passed.\n";
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

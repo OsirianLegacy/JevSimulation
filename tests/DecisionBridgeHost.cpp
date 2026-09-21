@@ -3,10 +3,11 @@
 #include <chrono>
 #include <thread>
 #include <iostream>
+#include <filesystem>
 int main(int argc,char **argv) {
     try {
-        if(argc!=2) throw std::runtime_error("Proxy URL required");
-        ai::BridgeTransport bridge(JevNodeExecutable,JevDecisionBridge,JevProjectDirectory,argv[1],2);
+        if(argc!=2 && argc!=3) throw std::runtime_error("Proxy URL required");
+        ai::BridgeTransport bridge(JevNodeExecutable,JevDecisionBridge,JevProjectDirectory,argv[1],2,argc==3?std::filesystem::absolute(argv[2]).wstring():std::wstring{});
         for (int i=0;i<2;++i) {
             ai::Json request{{"version",1},{"session","bridge-host"},{"request",std::to_string(i)},{"revision",i},
                 {"self",ai::Json::object()},{"rules",{{"wait","Wait"}}},{"range",{{"radius",8}}},

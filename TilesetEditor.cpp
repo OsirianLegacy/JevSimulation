@@ -47,7 +47,7 @@ EditorInput EditorInput::read() {
 }
 
 Rectangle TilesetEditor::atlas(int height) const {
-    const int top = layer_ == GridLayer::Objects ? 294 : 214;
+    const int top = layer_ == GridLayer::Objects ? 332 : 214;
     return {16, static_cast<float>(top), 312, static_cast<float>(std::max(32, height - top - 158))};
 }
 bool TilesetEditor::capturesMouse(Vector2 mouse) const {
@@ -80,7 +80,13 @@ void TilesetEditor::stamp(SceneWorld& grid, CellPosition end) {
             const TileRef tile{selected_.tileset,selected_.column+x,selected_.row+y};
             if (stroke_ == 2) grid.erase(cell, layer_);
             else if (layer_ == GridLayer::Objects) {
-                if (objectTypeId_.empty()) grid.placeObject(cell,tile,objectType_);
+                if (grid.creatureAt(cell)) continue;
+                if (!harvestBrush_.empty() && objectType_==ObjectType::Gatherable && grid.creatureCatalog().harvestables.contains(harvestBrush_)) {
+                    if(grid.objectAt(cell) || !grid.isWalkable(cell))continue;
+                    const auto id=grid.placeObject(cell,tile,ObjectType::Gatherable);
+                    grid.setHarvestable(id,harvestBrush_);
+                }
+                else if (objectTypeId_.empty()) grid.placeObject(cell,tile,objectType_);
                 else grid.placeObject(cell,tile,objectTypeId_);
             }
             else grid.paint(cell, layer_, tile);
@@ -100,7 +106,7 @@ void TilesetEditor::update(SceneWorld& grid, const Camera2D& camera, const Edito
        (stroke_==1 && !input.leftDown) || (stroke_==2 && !input.rightDown)))finishStroke(grid);
     if(!objectTypeId_.empty() && !types.contains(objectTypeId_))objectTypeId_.clear();
     if(input.focused && !textInputActive() && (!playing_ || paused_) && (input.undo || input.redo)) {
-        finishStroke(grid);if(input.undo)grid.undo();else grid.redo();inspector_.refresh(grid);return;
+        finishStroke(grid);if(input.undo)grid.undo();else grid.redo();inspector_.refresh(grid);creatureEditor_.reset();return;
     }
     if(open_ && input.focused && input.mouse.x>=panelWidth && input.mouse.y>=44 && input.mouse.y<82){
         if(input.leftPressed) {
@@ -133,6 +139,7 @@ void TilesetEditor::update(SceneWorld& grid, const Camera2D& camera, const Edito
     if (input.toggle) { open_ = !open_; dropdown_ = selecting_ = customTypesOpen_ = false; stroke_ = 0; previous_.reset(); inspector_.clear(); catalogEditor_.reset(); }
     if (!open_ || !input.focused) { stroke_ = 0; dragScroll_ = 0; selecting_ = false; previous_.reset(); return; }
     if (input.mouse.y >= 0 && input.mouse.y < 82 && input.mouse.x >= panelWidth) {
+        if (GetScreenWidth()>=1048 && input.leftPressed && inside(input.mouse,{888,8,150,30})) {mode_=EditorMode::Harvestables;harvestEditor_.reset();return;}
         stroke_ = 0; previous_.reset();
         if (input.leftPressed) for (int i=0;i<3;++i) {
             if (inside(input.mouse,{372.0f+172*i,8,164,30})) {
@@ -142,8 +149,50 @@ void TilesetEditor::update(SceneWorld& grid, const Camera2D& camera, const Edito
         }
         return;
     }
+    if(mode_==EditorMode::Harvestables){
+        if(input.leftPressed && inside(input.mouse,{736,88,170,28}) && grid.creatureCatalog().harvestables.contains(harvestEditor_.selectedDefinition())) {
+            harvestBrush_=harvestEditor_.selectedDefinition();mode_=EditorMode::Tiles;layer_=GridLayer::Objects;
+            objectType_=ObjectType::Gatherable;objectTypeId_.clear();inspect_=false;selectionSize_={1,1};
+            inspector_.clear();stroke_=0;previous_.reset();return;
+        }
+        if(harvestEditor_.update(grid,input,height,selected_))mapAction_=MapAction::Save;return;
+    }
+    if(mode_==EditorMode::Creatures){if(creatureEditor_.update(grid,input,height))mapAction_=MapAction::Save;return;}
     if (mode_ != EditorMode::Tiles) {
+        if(mode_==EditorMode::ObjectTypes && input.leftPressed && inside(input.mouse,{16,394,328,28})) {mode_=EditorMode::Harvestables;harvestEditor_.reset();return;}
         if (catalogEditor_.update(grid,input,mode_==EditorMode::ObjectTypes,height)) mapAction_=MapAction::Save;
+        return;
+    }
+    if (layer_ == GridLayer::Entities && input.mouse.y >= 166 && input.mouse.y < height - 132) {
+        if(!grid.creatureCatalog().permits(creatureSpecies_,creatureVocation_)){creatureSpecies_={};creatureVocation_={};}
+        if (capturesMouse(input.mouse)) {
+            if (input.leftPressed && inside(input.mouse,{16,176,158,28})) creatureControl_=ControlOwnership::AI;
+            if (input.leftPressed && inside(input.mouse,{184,176,160,28})) creatureControl_=ControlOwnership::Player;
+            const auto cycle=[&](const auto& map,std::uint32_t id){auto it=map.find(id);if(it==map.end() || ++it==map.end())it=map.begin();return it->first;};
+            if(input.leftPressed && inside(input.mouse,{16,224,328,28})){
+                creatureSpecies_.species=static_cast<scene::Species>(cycle(grid.creatureCatalog().species,static_cast<std::uint32_t>(creatureSpecies_.species)));
+                creatureSpecies_.subSpecies=scene::SubSpecies::Default;creatureVocation_={};}
+            if(input.leftPressed && inside(input.mouse,{16,260,328,28}))creatureSpecies_.subSpecies=static_cast<scene::SubSpecies>(cycle(grid.creatureCatalog().species.at(static_cast<std::uint32_t>(creatureSpecies_.species)).subSpecies,static_cast<std::uint32_t>(creatureSpecies_.subSpecies)));
+            if(input.leftPressed && inside(input.mouse,{16,296,328,28})){
+                std::map<std::uint32_t,int> allowed{{0,0}};for(const auto& [id,v]:grid.creatureCatalog().vocations)if(v.species.contains(static_cast<std::uint32_t>(creatureSpecies_.species)))allowed[id]=0;
+                creatureVocation_.id=cycle(allowed,creatureVocation_.id);}
+            if(input.leftPressed && inside(input.mouse,{16,420,328,30})){mode_=EditorMode::Creatures;creatureEditor_.reset();}
+        } else {
+            const auto cell=grid.worldToCell(GetScreenToWorld2D(input.mouse,camera));
+            if(cell && input.leftPressed && input.shift)if(auto id=grid.creatureAt(*cell))grid.setCreatureIdentity(*id,creatureSpecies_,creatureVocation_);
+            if (cell && input.leftPressed && grid.isWalkable(*cell))
+                grid.spawnCreature(*cell,creatureSpecies_,creatureVocation_,creatureControl_);
+            if (cell && input.rightPressed) if (auto id=grid.creatureAt(*cell)) grid.removeCreature(*id);
+        }
+        return;
+    }
+    // Entity clicks on the world below the panel buttons still place/remove normally.
+    if (layer_ == GridLayer::Entities && !capturesMouse(input.mouse)) {
+        const auto cell=grid.worldToCell(GetScreenToWorld2D(input.mouse,camera));
+        if(cell && input.leftPressed && input.shift)if(auto id=grid.creatureAt(*cell))grid.setCreatureIdentity(*id,creatureSpecies_,creatureVocation_);
+        if (cell && input.leftPressed && grid.isWalkable(*cell))
+            grid.spawnCreature(*cell,creatureSpecies_,creatureVocation_,creatureControl_);
+        if (cell && input.rightPressed) if (auto id=grid.creatureAt(*cell)) grid.removeCreature(*id);
         return;
     }
     if (customTypesOpen_) {
@@ -155,7 +204,7 @@ void TilesetEditor::update(SceneWorld& grid, const Camera2D& camera, const Edito
             if(inside(input.mouse,list)) {
                 auto found=types.begin();
                 std::advance(found,customTypeOffset_+static_cast<int>((input.mouse.y-274)/30));
-                if(found!=types.end()) { objectTypeId_=found->first; objectType_=found->second.behavior; }
+                if(found!=types.end()) { objectTypeId_=found->first; objectType_=found->second.behavior; harvestBrush_.clear(); }
             }
             customTypesOpen_=false;
         }
@@ -198,21 +247,33 @@ void TilesetEditor::update(SceneWorld& grid, const Camera2D& camera, const Edito
             if (inside(input.mouse, {282, 12, 62, 26})) { open_ = false; return; }
             if (inside(input.mouse, {16, static_cast<float>(height - 132), 158, 26})) { mapAction_ = MapAction::Save; return; }
             if (inside(input.mouse, {184, static_cast<float>(height - 132), 160, 26})) { mapAction_ = MapAction::Load; return; }
-            if (inside(input.mouse, dropdownButton) && tilesets_.count()) { dropdown_ = true; return; }
+            if (layer_ != GridLayer::Entities && inside(input.mouse, dropdownButton) && tilesets_.count()) { dropdown_ = true; return; }
             if (inside(input.mouse, {16, 108, 158, 30})) { layer_ = GridLayer::Ground; inspect_ = false; inspector_.clear(); return; }
             if (inside(input.mouse, {184, 108, 160, 30})) { layer_ = GridLayer::Walls; inspect_ = false; inspector_.clear(); return; }
+            if (inside(input.mouse, {184, 144, 160, 22})) {
+                finishStroke(grid); layer_=GridLayer::Entities; inspect_=false; dropdown_=selecting_=false;
+                selectionSize_={1,1}; inspector_.clear(); return;
+            }
             if (inside(input.mouse, {16, 144, 158, 22})) { layer_ = GridLayer::Objects; return; }
             if (layer_ == GridLayer::Objects) {
                 if (inside(input.mouse, {16,176,158,28})) { inspect_ = false; inspector_.clear(); return; }
                 if (inside(input.mouse, {184,176,160,28})) { inspect_ = true; return; }
                 if (!inspect_) for (int type = 0; type < 3; ++type)
-                    if (inside(input.mouse, {16.0f+type*110,214,106,28})) { objectType_ = static_cast<ObjectType>(type); objectTypeId_.clear(); return; }
+                    if (inside(input.mouse, {16.0f+type*110,214,106,28})) { objectType_ = static_cast<ObjectType>(type); objectTypeId_.clear(); harvestBrush_.clear(); return; }
                 if(!inspect_ && inside(input.mouse,{16,246,328,28}) && !types.empty()) {
                     customTypesOpen_=true; customTypeOffset_=0; return;
                 }
             } else {
                 if (inside(input.mouse, {246, 176, 28, 28})) { scale_ = std::max(1, scale_ - 1); clampScroll(height); }
                 if (inside(input.mouse, {282, 176, 28, 28})) { scale_ = std::min(4, scale_ + 1); clampScroll(height); }
+            }
+            if(layer_==GridLayer::Objects && !inspect_ && inside(input.mouse,{16,284,328,28})) {
+                const auto &defs=grid.creatureCatalog().harvestables;
+                auto it=defs.find(harvestBrush_);
+                if(it==defs.end())it=defs.begin();else ++it;
+                harvestBrush_=it==defs.end()?"":it->first;
+                if(!harvestBrush_.empty()){objectType_=ObjectType::Gatherable;objectTypeId_.clear();selectionSize_={1,1};}
+                return;
             }
             if (inspect_) { inspector_.update(grid, input, height); return; }
             if (inside(input.mouse, verticalTrack(view))) dragScroll_ = 1;
@@ -267,6 +328,10 @@ void TilesetEditor::drawBrush(const SceneWorld& grid, const Camera2D& camera, Ve
     if (!open_ || mode_!=EditorMode::Tiles || inspect_ || selecting_ || capturesMouse(mouse)) return;
     auto cell = grid.worldToCell(GetScreenToWorld2D(mouse, camera));
     if (!cell) return;
+    if (layer_==GridLayer::Entities) {
+        DrawRectangleLinesEx(grid.cellBounds(*cell),1/camera.zoom,grid.isWalkable(*cell)?accent:RED);
+        return;
+    }
     if(stroke_ && previous_) {
         cell->x=strokeOrigin_.x+static_cast<int>(std::floor(static_cast<double>(cell->x-strokeOrigin_.x)/selectionSize_.x))*selectionSize_.x;
         cell->y=strokeOrigin_.y+static_cast<int>(std::floor(static_cast<double>(cell->y-strokeOrigin_.y)/selectionSize_.y))*selectionSize_.y;
@@ -289,6 +354,7 @@ void TilesetEditor::drawTransport() const {
 void TilesetEditor::drawMenu() const {
     DrawRectangle(panelWidth,0,std::max(0,GetScreenWidth()-panelWidth),44,background);
     const char* labels[]{"Tile Painting","Item Creation","Object Types"};
+    if(GetScreenWidth()>=1048)button({888,8,150,30},"Harvestables",mode_==EditorMode::Harvestables,playing_);
     for(int i=0;i<3;++i) button({372.0f+172*i,8,164,30},labels[i],mode_==static_cast<EditorMode>(i),playing_);
 }
 void TilesetEditor::draw(int height) const {
@@ -302,6 +368,8 @@ void TilesetEditor::draw(int height) const {
         inspector_.draw(height);drawMenu();drawTransport();return;
     }
     if (mode_!=EditorMode::Tiles && grid_) {
+        if(mode_==EditorMode::Harvestables){harvestEditor_.draw(*grid_,height);drawMenu();drawTransport();return;}
+        if(mode_==EditorMode::Creatures){creatureEditor_.draw(height);drawMenu();drawTransport();return;}
         catalogEditor_.draw(*grid_,mode_==EditorMode::ObjectTypes,height); drawMenu(); drawTransport(); return;
     }
     DrawRectangle(0, 0, panelWidth, height, background);
@@ -319,7 +387,25 @@ void TilesetEditor::draw(int height) const {
     button({16, 108, 158, 30}, "Ground", layer_ == GridLayer::Ground);
     button({184, 108, 160, 30}, "Walls", layer_ == GridLayer::Walls);
     button({16, 144, 158, 22}, "Objects", layer_ == GridLayer::Objects);
-    button({184, 144, 160, 22}, "Entities (reserved)", false, true);
+    button({184, 144, 160, 22}, "Entities", layer_==GridLayer::Entities);
+    if (layer_==GridLayer::Entities) {
+        button({16,176,158,28},"Jev AI",creatureControl_==ControlOwnership::AI);
+        button({184,176,160,28},"Player",creatureControl_==ControlOwnership::Player);
+        if(grid_){const auto& catalog=grid_->creatureCatalog();
+            const auto s=catalog.species.find(static_cast<std::uint32_t>(creatureSpecies_.species));
+            if(s!=catalog.species.end()) {button({16,224,328,28},("Species: "+s->second.name).c_str());
+                const auto sub=s->second.subSpecies.find(static_cast<std::uint32_t>(creatureSpecies_.subSpecies));
+                button({16,260,328,28},("Subspecies: "+(sub==s->second.subSpecies.end()?std::string("Default"):sub->second)).c_str());}
+            const auto v=catalog.vocations.find(creatureVocation_.id);button({16,296,328,28},("Vocation: "+(v==catalog.vocations.end()?std::string("Unassigned"):v->second.name)).c_str());}
+        DrawText("Click choices to cycle. Left: place",16,340,15,LIGHTGRAY);
+        DrawText("Shift+click: assign to existing creature",16,364,14,muted);
+        DrawText("Play: select player, arrows to move.",16,390,14,muted);
+        button({16,420,328,30},"Species / Vocation Editors");
+        button({16,static_cast<float>(height-132),158,26},"Save  Ctrl+S");
+        button({184,static_cast<float>(height-132),160,26},"Load  Ctrl+O");
+        DrawText("Save placements before closing.",16,height-92,15,muted);
+        drawMenu(); drawTransport(); return;
+    }
     if (layer_ == GridLayer::Objects) {
         button({16,176,158,28}, "Paint", !inspect_); button({184,176,160,28}, "Inspect", inspect_);
         if (!inspect_) {
@@ -330,6 +416,8 @@ void TilesetEditor::draw(int height) const {
             BeginScissorMode(16,246,328,28);
             button({16,246,328,28},custom.c_str(),!objectTypeId_.empty(),!grid_ || grid_->objectTypes().empty());
             EndScissorMode();
+            const std::string label="Harvest: "+(harvestBrush_.empty()?std::string("None"):harvestBrush_)+" >";
+            button({16,284,328,28},label.c_str(),!harvestBrush_.empty());
         }
     } else {
         DrawText("8 x 8 TILES", 16, 185, 14, muted);

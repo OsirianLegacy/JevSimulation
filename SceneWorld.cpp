@@ -1,21 +1,26 @@
 #include "SceneWorld.h"
 #include "SceneComponents.h"
 #include "TilesetLibrary.h"
+#include "EntityPresentation.h"
 #include <algorithm>
 #include <exception>
 #include <stdexcept>
 #include <utility>
 #include <queue>
 #include <set>
+#include <random>
 
 using namespace scene;
 namespace {
+std::mt19937 &harvestRandom() { static thread_local std::mt19937 rng(std::random_device{}()); return rng; }
 struct CellSnapshot {
     GridCell cell;
     std::optional<Object> object;
     bool operator==(const CellSnapshot &) const = default;
 };
 struct Delta {
+    std::unordered_map<Guid, std::optional<Harvestable>, GuidHash> harvestBefore, harvestAfter;
+    std::optional<CreatureCatalog> catalogBefore, catalogAfter;
     std::unordered_map<Guid, std::optional<Entity>, GuidHash> creaturesBefore, creaturesAfter;
     std::unordered_map<Guid, std::optional<Resource>, GuidHash> resourcesBefore, resourcesAfter;
     std::map<std::size_t, CellSnapshot> before, after;
@@ -27,6 +32,17 @@ struct Delta {
 struct SceneWorld::Impl {
     Grid terrain;
     flecs::world ecs;
+    CreatureCatalog catalog;
+    std::unordered_map<Guid,HumanName,GuidHash> humanNames;
+    std::unordered_set<std::string> reservedNames;
+    void nameHuman(Guid id, Species species) {
+        auto owner=entity(id);
+        if(species!=Species::Human){owner.remove<HumanName>();return;}
+        if(!humanNames.contains(id)) {
+            auto name=generateHumanName(reservedNames);reservedNames.insert(name.full());humanNames.emplace(id,std::move(name));
+        }
+        owner.set<HumanName>(humanNames.at(id));
+    }
     std::unordered_map<Guid, flecs::entity_t, GuidHash> entities;
     using ChunkKey = std::pair<int, int>;
     using ChunkIndex = std::map<ChunkKey, std::unordered_set<Guid, GuidHash>>;
@@ -60,6 +76,8 @@ struct SceneWorld::Impl {
             ++time.ticks;
             time.seconds += 1.0 / 60;
         });
+        ecs.system<Resource>("AdvanceCreatureNeeds").kind(gameplay).with<Creature>()
+            .each([](Resource &resources) { resources.advanceNeeds(1.0f / 60); });
         ecs.system<const PersistentId, const GridPosition, const TileSprite>("ReconcileSpatial")
             .kind(spatial)
             .with<PlacedObject>()
@@ -165,14 +183,32 @@ Rectangle SceneWorld::worldBounds() const {
 CellRange SceneWorld::visibleRange(Rectangle r) const {
     return impl_->terrain.visibleRange(r);
 }
-void SceneWorld::draw(Rectangle view, const TilesetLibrary *library) const {
+void SceneWorld::draw(Rectangle view, const TilesetLibrary *library, const EntityPresentation *presentation) const {
     impl_->terrain.draw(view, library);
     const auto range = visibleRange(view);
+    if (!range.empty()) for (int cy=range.minY/chunkSize;cy<=(range.maxY-1)/chunkSize;++cy)
+        for(int cx=range.minX/chunkSize;cx<=(range.maxX-1)/chunkSize;++cx)
+            for(auto id:objectsInChunk({cx,cy})) {
+                const auto object=findObject(id);const auto cell=*objectPosition(id);
+                const auto bounds=cellBounds(cell);
+                if(harvestable(id)) {
+                    const auto pool=resource(id,Resource::Health).value_or(*resource(id,Harvestable::Units));
+                    if(!pool.full()) {
+                        DrawRectangleRec({bounds.x,bounds.y,bounds.width,cellSize()*0.12f},DARKGRAY);
+                        DrawRectangleRec({bounds.x,bounds.y,bounds.width*pool.fraction(),cellSize()*0.12f},GREEN);
+                    }
+                } else if(object->type()==ObjectType::Gatherable && !object->contents().empty()) {
+                    const auto center=cellCenter(cell);
+                    DrawCircleV(center,cellSize()*0.3f,DARKBROWN);
+                    DrawRectangleRec({center.x-cellSize()*0.18f,center.y-cellSize()*0.18f,cellSize()*0.36f,cellSize()*0.36f},GOLD);
+                }
+            }
     if (!range.empty()) for (int cy = range.minY / chunkSize; cy <= (range.maxY - 1) / chunkSize; ++cy)
         for (int cx = range.minX / chunkSize; cx <= (range.maxX - 1) / chunkSize; ++cx)
             for (auto id : creaturesInChunk({cx, cy})) {
                 auto e = impl_->entity(id);
-                DrawCircleV(e.get<Position>().worldPosition(), cellSize() * 0.35f,
+                if (presentation) presentation->drawCreature(*findCreature(id),impl_->catalog,simulationTime());
+                else DrawCircleV(e.get<Position>().worldPosition(), cellSize() * 0.35f,
                     e.get<Creature>().control == ControlOwnership::Player ? SKYBLUE : ORANGE);
             }
 }
@@ -278,8 +314,16 @@ void SceneWorld::install(CellPosition c, const Object &object, TileRef tile) {
         entity.add<Gatherable>().add<Inventory>();
     if (!object.typeDefinitionId().empty())
         entity.is_a(impl_->entity(impl_->typeKeys.at(object.typeDefinitionId())));
+    installInventory(object.id(), object.contents());
+    impl_->objectChunks[Impl::chunk(c)].insert(object.id());
+    auto &cell = impl_->terrain.cells_[index(c)];
+    cell.objectId = object.id();
+    cell.tile(GridLayer::Objects) = tile; // Derived render/spatial cache.
+}
+void SceneWorld::installInventory(Guid owner, const std::vector<Item> &items) {
+    const auto entity = impl_->entity(owner);
     std::uint32_t order = 0;
-    for (const auto &item : object.contents()) {
+    for (const auto &item : items) {
         auto child = impl_->create(item.guid)
                          .set<ItemStack>({item.definitionId, item.displayName, item.quantity})
                          .set<ItemOrder>({order++})
@@ -288,12 +332,9 @@ void SceneWorld::install(CellPosition c, const Object &object, TileRef tile) {
         if (definition != impl_->itemKeys.end())
             child.is_a(impl_->entity(definition->second));
     }
-    impl_->objectChunks[Impl::chunk(c)].insert(object.id());
-    auto &cell = impl_->terrain.cells_[index(c)];
-    cell.objectId = object.id();
-    cell.tile(GridLayer::Objects) = tile; // Derived render/spatial cache.
 }
 void SceneWorld::eraseInstance(Guid id) {
+    touchHarvestable(id);
     touchResources(id);
     auto entity = impl_->entity(id);
     if (!entity)
@@ -397,6 +438,7 @@ bool SceneWorld::moveObject(CellPosition from, CellPosition to) {
     return true;
 }
 void SceneWorld::updateObject(Guid id, bool open, std::vector<Item> items) {
+    const auto harvest = harvestable(id);
     auto object = findObject(id);
     if (!object)
         throw std::out_of_range("Object not found.");
@@ -435,6 +477,7 @@ void SceneWorld::updateObject(Guid id, bool open, std::vector<Item> items) {
     });
     eraseInstance(id);
     install(cell, *object, tile);
+    if (harvest) impl_->entity(id).set<Harvestable>(*harvest);
     for (const auto &[guid, value] : retained)
         if (auto target = impl_->entity(guid))
             target.set<Resource>(value);
@@ -446,35 +489,77 @@ void SceneWorld::setObjectOpen(Guid id, bool open) {
     updateObject(id, open, object->contents());
 }
 void SceneWorld::addItem(Guid id, Item item) {
-    const auto object = findObject(id);
-    if (!object)
-        throw std::out_of_range("Object not found.");
-    auto items = object->contents();
+    auto current = inventory(id);
+    if (!current) throw std::out_of_range("Inventory not found.");
+    auto items = std::move(*current);
     item.guid = {};
     items.push_back(item);
-    updateObject(id, object->isOpen(), std::move(items));
+    updateInventory(id, std::move(items));
 }
 void SceneWorld::updateItem(Guid id, std::size_t position, Item item) {
-    const auto object = findObject(id);
-    if (!object)
-        throw std::out_of_range("Object not found.");
-    auto items = object->contents();
+    auto current = inventory(id);
+    if (!current) throw std::out_of_range("Inventory not found.");
+    auto items = std::move(*current);
     const auto old = items.at(position).guid;
     if (!item.guid.empty() && item.guid != old)
         throw std::invalid_argument("Cannot change GUID.");
     item.guid = old;
     items[position] = item;
-    updateObject(id, object->isOpen(), std::move(items));
+    updateInventory(id, std::move(items));
 }
 void SceneWorld::removeItem(Guid id, std::size_t position) {
-    const auto object = findObject(id);
-    if (!object)
-        throw std::out_of_range("Object not found.");
-    auto items = object->contents();
+    auto current = inventory(id);
+    if (!current) throw std::out_of_range("Inventory not found.");
+    auto items = std::move(*current);
     if (position >= items.size())
         throw std::out_of_range("Item index invalid.");
     items.erase(items.begin() + position);
-    updateObject(id, object->isOpen(), std::move(items));
+    updateInventory(id, std::move(items));
+}
+std::optional<std::vector<Item>> SceneWorld::inventory(Guid id) const {
+    const auto owner = impl_->entity(id);
+    if (!owner || !owner.has<Inventory>()) return {};
+    std::map<std::uint32_t, Item> ordered;
+    owner.children<ContainedBy>([&](flecs::entity child) {
+        const auto &stack = child.get<ItemStack>();
+        ordered.emplace(child.get<ItemOrder>().value,
+            Item{stack.definitionId, stack.displayName, stack.quantity, child.get<PersistentId>().value});
+    });
+    std::vector<Item> items;
+    for (const auto &[order, item] : ordered) items.push_back(item);
+    return items;
+}
+void SceneWorld::updateInventory(Guid id, std::vector<Item> items) {
+    auto current = inventory(id);
+    if (!current) throw std::out_of_range("Inventory not found.");
+    if (auto object = findObject(id)) {
+        updateObject(id, object->isOpen(), std::move(items));
+        return;
+    }
+    Inventory::validate(items);
+    std::unordered_set<Guid, GuidHash> owned, seen;
+    for (const auto &item : *current) owned.insert(item.guid);
+    std::size_t newStacks = 0;
+    for (const auto &item : items) {
+        if (item.guid.empty()) ++newStacks;
+        else if (!owned.contains(item.guid) || !seen.insert(item.guid).second)
+            throw std::invalid_argument("Foreign or duplicated item GUID.");
+    }
+    if (impl_->used.size() + newStacks > maxGuidHistory)
+        throw std::length_error("GUID history full.");
+    if (*current == items) return;
+    Operation command(*this);
+    touchCreature(id);
+    for (auto &item : items) if (item.guid.empty()) item.guid = impl_->allocate();
+    std::unordered_map<Guid, Resource, GuidHash> retained;
+    for (const auto &item : *current) {
+        if (auto resource = resources(item.guid)) retained.emplace(item.guid, *resource);
+        impl_->entity(item.guid).destruct();
+        impl_->entities.erase(item.guid);
+    }
+    installInventory(id, items);
+    for (const auto &[guid, value] : retained)
+        if (auto child = impl_->entity(guid)) child.set<Resource>(value);
 }
 void SceneWorld::paint(CellPosition c, GridLayer layer, TileRef tile) {
     at(c).tile(layer);
@@ -579,6 +664,8 @@ WorldDocument SceneWorld::document() const {
     const auto bounds = worldBounds();
     WorldDocument doc(width(), height(), cellSize(), {bounds.x, bounds.y});
     doc.cells_ = impl_->terrain.cells_;
+    for (const auto &[id,handle] : impl_->entities)
+        if (auto value=harvestable(id)) doc.harvestables.emplace(id,*value);
     for (const auto &[id, handle] : impl_->entities)
         if (auto value = resources(id))
             doc.resources.emplace(id, *value);
@@ -587,9 +674,11 @@ WorldDocument SceneWorld::document() const {
             doc.objects_.emplace(id, *findObject(id));
     for (auto id : impl_->creatureIds) {
         auto e = findCreature(id);
-        doc.creatures.push_back({id, e->type(), e->control(), e->position()});
+        doc.creatures.push_back({id, e->type(), e->control(), e->position(),e->species(),e->vocation(),e->inventory(),e->disposition()});
     }
     doc.itemDefinitions_ = itemDefinitions();
+    doc.creatureCatalog=impl_->catalog;
+    doc.humanNames=impl_->humanNames;
     doc.objectTypes_ = objectTypes();
     doc.usedGuids_ = impl_->used;
     return doc;
@@ -597,8 +686,13 @@ WorldDocument SceneWorld::document() const {
 SceneWorld SceneWorld::fromDocument(const WorldDocument &doc) {
     // Validate the complete identity table before building any runtime relationships.
     doc.validateGuidState(doc.guidState());
+    doc.validateHarvestables();
+    doc.validateHumanNames();
     SceneWorld result(doc.width_, doc.height_, doc.cellSize_, doc.origin_);
     auto &impl = *result.impl_;
+    impl.humanNames=doc.humanNames;
+    for(const auto &[id,name]:doc.humanNames)impl.reservedNames.insert(name.full());
+    doc.creatureCatalog.validate();impl.catalog=doc.creatureCatalog;
     for (const auto &[key, value] : doc.itemDefinitions_) {
         Object::validate(ObjectType::Container, false, {{key, value.displayName, 1}});
         if (key != value.id)
@@ -663,6 +757,18 @@ SceneWorld SceneWorld::fromDocument(const WorldDocument &doc) {
         entity.set<Resource>(value);
     }
     result.reserveHistory(doc.usedGuids_);
+    for (const auto &[id,h] : doc.harvestables) {
+        const auto object=result.findObject(id);
+        const auto pool=result.resource(id,Harvestable::Units);
+        if (!object || object->type()!=ObjectType::Gatherable || !impl.catalog.harvestables.contains(h.definitionId) || !pool ||
+            !std::isfinite(h.regenerationRemaining) || h.regenerationRemaining<0)
+            throw std::invalid_argument("Invalid harvestable owner, definition, units, or timer.");
+        validateHarvestPool(*pool);
+        const auto &d=impl.catalog.harvestables.at(h.definitionId);
+        if (h.regenerationRemaining>d.regenerationSeconds || (!pool->depleted() && h.regenerationRemaining!=0))
+            throw std::invalid_argument("Invalid harvest regeneration state.");
+        impl.entity(id).set<Harvestable>(h);
+    }
     result.markSaved();
     return result;
 }
@@ -709,6 +815,7 @@ void SceneWorld::beginEdit() {
 void SceneWorld::touch(CellPosition cell) {
     const auto owner = at(cell).objectId;
     if (!owner.empty()) {
+        touchHarvestable(owner);
         touchResources(owner);
         impl_->entity(owner).children<ContainedBy>(
             [&](flecs::entity child) { touchResources(child.get<PersistentId>().value); });
@@ -739,22 +846,28 @@ void SceneWorld::endEdit() {
         delta.itemsAfter[key] = items.contains(key) ? std::optional(items.at(key)) : std::nullopt;
     for (const auto &[key, value] : delta.typesBefore)
         delta.typesAfter[key] = types.contains(key) ? std::optional(types.at(key)) : std::nullopt;
+    for (auto it = delta.creaturesBefore.begin(); it != delta.creaturesBefore.end();) {
+        auto after = findCreature(it->first);
+        if (after == it->second) it = delta.creaturesBefore.erase(it);
+        else { delta.creaturesAfter.emplace(it->first, after); ++it; }
+    }
     for (auto it = delta.resourcesBefore.begin(); it != delta.resourcesBefore.end();) {
         auto after = resources(it->first);
-        if ((!after && !it->second) || (after == it->second && delta.before.empty()))
+        if ((!after && !it->second) || (after == it->second && delta.before.empty() && delta.creaturesBefore.empty()))
             it = delta.resourcesBefore.erase(it);
         else {
             delta.resourcesAfter.emplace(it->first, after);
             ++it;
         }
     }
-    for (auto it = delta.creaturesBefore.begin(); it != delta.creaturesBefore.end();) {
-        auto after = findCreature(it->first);
-        if (after == it->second) it = delta.creaturesBefore.erase(it);
-        else { delta.creaturesAfter.emplace(it->first, after); ++it; }
+    if(delta.catalogBefore) {if(*delta.catalogBefore==impl_->catalog)delta.catalogBefore.reset();else delta.catalogAfter=impl_->catalog;}
+    for (auto it=delta.harvestBefore.begin();it!=delta.harvestBefore.end();) {
+        auto after=harvestable(it->first);
+        if (after==it->second && delta.before.empty()) it=delta.harvestBefore.erase(it);
+        else {delta.harvestAfter.emplace(it->first,after);++it;}
     }
-    if (delta.creaturesBefore.empty() && delta.before.empty() && delta.itemsBefore.empty() && delta.typesBefore.empty() &&
-        delta.resourcesBefore.empty())
+    if (!delta.catalogBefore && delta.creaturesBefore.empty() && delta.before.empty() && delta.itemsBefore.empty() && delta.typesBefore.empty() &&
+        delta.resourcesBefore.empty() && delta.harvestBefore.empty())
         return;
     delta.afterRevision = impl_->revision = ++impl_->nextRevision;
     impl_->undo.push_back(std::move(delta));
@@ -770,6 +883,7 @@ void SceneWorld::applyHistory(bool forward) {
     auto delta = std::move(source.back());
     source.pop_back();
     const auto &creatures = forward ? delta.creaturesAfter : delta.creaturesBefore;
+    if(delta.catalogBefore)impl_->catalog=forward?*delta.catalogAfter:*delta.catalogBefore;
     for (const auto &[id, value] : creatures) eraseCreature(id);
     const auto &cells = forward ? delta.after : delta.before;
     const auto &items = forward ? delta.itemsAfter : delta.itemsBefore;
@@ -817,7 +931,7 @@ void SceneWorld::applyHistory(bool forward) {
             install(coordinates(i), *snapshot.object, snapshot.cell.tile(GridLayer::Objects));
     }
     for (const auto &[id, value] : creatures)
-        if (value) installCreature({id, value->type(), value->control(), value->position()}, value->resources());
+        if (value) installCreature({id, value->type(), value->control(), value->position(),value->species(),value->vocation(),value->inventory(),value->disposition()}, value->resources());
     for (const auto &[id, value] : forward ? delta.resourcesAfter : delta.resourcesBefore) {
         if (auto entity = impl_->entity(id)) {
             if (value)
@@ -827,6 +941,10 @@ void SceneWorld::applyHistory(bool forward) {
         }
     }
     impl_->revision = forward ? delta.afterRevision : delta.beforeRevision;
+    for (const auto &[id,value] : forward?delta.harvestAfter:delta.harvestBefore)
+        if (auto entity=impl_->entity(id)) {
+            if (value) entity.set<Harvestable>(*value); else entity.remove<Harvestable>();
+        }
     destination.push_back(std::move(delta));
 }
 void SceneWorld::cancelEdit() {
@@ -875,6 +993,8 @@ void SceneWorld::tick() {
     if (impl_->depth)
         throw std::logic_error("Cannot simulate a pending authoring stroke.");
     impl_->ecs.progress(1.0f / 60);
+    advanceHarvestLifecycle(1.0 / 60);
+    collectGatherables();
 }
 std::uint64_t SceneWorld::ticks() const {
     return impl_->clock.get<SimulationClock>().ticks;
@@ -895,6 +1015,14 @@ std::vector<std::string> SceneWorld::componentNames(Guid id) const {
                                 (field.writable ? "" : " [locked]"));
         }
     const auto definition = entity.target(flecs::IsA);
+    if (auto h=harvestable(id)) {
+        const auto &d=impl_->catalog.harvestables.at(h->definitionId);
+        const auto pool=resource(id,Harvestable::Units);
+        names.push_back("  state: "+(pool->depleted()?d.depletedState:d.name));
+        names.push_back("  action: "+d.action+" / "+std::to_string(d.workSeconds)+" seconds");
+        names.push_back("  tool: "+(d.requiredTool.empty()?std::string("None"):d.requiredTool));
+        for (const auto &item:d.yields) names.push_back("  yield: "+item.displayName+" x"+std::to_string(item.quantity));
+    }
     if (definition)
         names.push_back("Definition: " + definition.get<DefinitionKey>().value);
     const auto owner = entity.target<ContainedBy>();
@@ -947,6 +1075,7 @@ void SceneWorld::touchResources(Guid id) {
         impl_->pending->resourcesBefore.try_emplace(id, resources(id));
 }
 void SceneWorld::setResource(Guid id, const std::string &key, ResourcePool pool) {
+    if (key==Harvestable::Units && harvestable(id)) validateHarvestPool(pool);
     auto entity = impl_->entity(id);
     if (!entity || entity.has(flecs::Prefab))
         throw std::invalid_argument("Resources require a persistent instance.");
@@ -957,8 +1086,23 @@ void SceneWorld::setResource(Guid id, const std::string &key, ResourcePool pool)
     Operation command(*this);
     touchResources(id);
     entity.set<Resource>(value);
+    if (key==Harvestable::Units) if (auto h=harvestable(id)) {
+        touchHarvestable(id);
+        const auto &d=impl_->catalog.harvestables.at(h->definitionId);
+        h->regenerationRemaining=pool.depleted()?d.regenerationSeconds:0;
+        const auto cell=entity.get<GridPosition>().value;
+        const auto tile=pool.depleted() && d.depletedTile.present()?d.depletedTile:h->sourceTile;
+        if (at(cell).tile(GridLayer::Objects)!=tile) {
+            touch(cell);entity.set<TileSprite>({tile});impl_->terrain.cells_[index(cell)].tile(GridLayer::Objects)=tile;
+        }
+        entity.set<Harvestable>(*h);
+        auto health=resource(id,Resource::Health).value_or(ResourcePool(100));
+        health.setCurrent(health.maximum()*pool.fraction());
+        auto synced=entity.get<Resource>();synced.set(Resource::Health,health);entity.set<Resource>(synced);
+    }
 }
 void SceneWorld::removeResource(Guid id, const std::string &key) {
+    if (key==Harvestable::Units && harvestable(id)) throw std::invalid_argument("Harvestable requires harvest units.");
     if (impl_->creatureIds.contains(id) && key == Resource::Health)
         throw std::invalid_argument("Creatures require Health.");
     auto value = resources(id);
@@ -1012,13 +1156,18 @@ std::optional<Entity> SceneWorld::findCreature(Guid id) const {
     auto e = impl_->entity(id);
     if (!e || !e.has<Creature>()) return {};
     const auto &c = e.get<Creature>();
-    return Entity(id, c.type, e.get<Resource>(), e.get<Position>(), c.control);
+    return Entity(id, c.type, e.get<Resource>(), e.get<Position>(), c.control,e.get<SpeciesComponent>(),e.get<VocationComponent>(),*inventory(id),e.has<HumanName>()?std::optional(e.get<HumanName>()):std::nullopt,e.get<DispositionComponent>().value);
 }
 void SceneWorld::touchCreature(Guid id) {
     if (impl_->pending) impl_->pending->creaturesBefore.try_emplace(id, findCreature(id));
     touchResources(id);
+    if (auto owner = impl_->entity(id))
+        owner.children<ContainedBy>([&](flecs::entity child) { touchResources(child.get<PersistentId>().value); });
 }
 void SceneWorld::installCreature(const CreatureRecord &r, const Resource &resources) {
+    dispositionName(r.disposition);
+    Inventory::validate(r.inventory);
+    if(!impl_->catalog.permits(r.species,r.vocation))throw std::invalid_argument("Invalid species, subspecies or vocation.");
     const auto c = r.position.cellCoordinates();
     const auto bounds = worldBounds();
     if (!contains(c) || creatureAt(c) || r.position.cellSize() != cellSize() ||
@@ -1027,7 +1176,9 @@ void SceneWorld::installCreature(const CreatureRecord &r, const Resource &resour
         r.type.find('\0') != std::string::npos || r.type.find_first_not_of(" \t\r\n") == std::string::npos ||
         (r.control != ControlOwnership::AI && r.control != ControlOwnership::Player))
         throw std::invalid_argument("Invalid creature record.");
-    impl_->create(r.id).set<Creature>({r.type, r.control}).set<Position>(r.position).set<Resource>(resources);
+    impl_->create(r.id).set<Creature>({r.type, r.control}).set<Position>(r.position).set<Resource>(resources).set<SpeciesComponent>(r.species).set<VocationComponent>(r.vocation).set<DispositionComponent>({r.disposition}).add<Inventory>();
+    impl_->nameHuman(r.id,r.species.species);
+    installInventory(r.id, r.inventory);
     impl_->occupied.emplace(index(c), r.id);
     impl_->creatureChunks[Impl::chunk(c)].insert(r.id);
     impl_->creatureIds.insert(r.id);
@@ -1037,10 +1188,12 @@ Guid SceneWorld::spawnCreature(CellPosition c, std::string type, ControlOwnershi
     if (!isWalkable(c)) throw std::invalid_argument("Creature spawn cell is blocked.");
     const auto bounds = worldBounds();
     Entity draft(std::move(type), health, Position(cellCenter(c), cellSize(), {bounds.x, bounds.y}), control);
+    for(const auto& [key,maximum]:impl_->catalog.species.at(0).resources)
+        if(key!=Resource::Health)draft.setResource(key,ResourcePool(maximum));
     if (impl_->used.size() >= maxGuidHistory) throw std::length_error("GUID history full.");
     Operation command(*this);
     touchCreature(draft.id());
-    installCreature({draft.id(), draft.type(), control, draft.position()}, draft.resources());
+    installCreature({draft.id(), draft.type(), control, draft.position(),{},{},{},impl_->catalog.species.at(0).defaultDisposition}, draft.resources());
     return draft.id();
 }
 void SceneWorld::eraseCreature(Guid id) {
@@ -1050,7 +1203,7 @@ void SceneWorld::eraseCreature(Guid id) {
     impl_->occupied.erase(index(c));
     Impl::unindex(impl_->creatureChunks, c, id);
     impl_->creatureIds.erase(id);
-    e.destruct(); impl_->entities.erase(id);
+    eraseInstance(id);
     ++impl_->membershipRevision;
 }
 void SceneWorld::removeCreature(Guid id) {
@@ -1060,6 +1213,7 @@ void SceneWorld::removeCreature(Guid id) {
 bool SceneWorld::moveCreature(Guid id, CellPosition to) {
     auto e = impl_->entity(id);
     if (!e || !e.has<Creature>() || !contains(to)) return false;
+    if (e.get<Resource>().find(Resource::Health)->depleted()) return false;
     const auto from = e.get<Position>().cellCoordinates();
     if (from == to) return true;
     if (!isWalkable(to)) return false;
@@ -1107,4 +1261,342 @@ std::vector<std::pair<CellPosition, int>> SceneWorld::reachableCells(Guid id, in
         for (auto n : neighbors(c, false, true)) if (visited.insert(index(n)).second) found.emplace_back(n,d+1);
     }
     return found;
+}
+
+const scene::CreatureCatalog& SceneWorld::creatureCatalog() const {return impl_->catalog;}
+void SceneWorld::setCreatureIdentity(Guid id, SpeciesComponent species, VocationComponent vocation) {
+    auto actor=findCreature(id);
+    if(!actor || !impl_->catalog.permits(species,vocation))throw std::invalid_argument("Invalid creature assignment.");
+    const auto& definition=impl_->catalog.species.at(static_cast<std::uint32_t>(species.species));
+    Resource pools;
+    for(const auto& [key,maximum]:definition.resources) {
+        auto prior=actor->resources().find(key);
+        pools.set(key,ResourcePool(maximum,prior?std::min(prior->current(),maximum):maximum));
+    }
+    Operation command(*this);touchCreature(id);
+    impl_->entity(id).set<SpeciesComponent>(species).set<VocationComponent>(vocation).set<Resource>(pools)
+        .set<Creature>({definition.name,actor->control()});
+    if(actor->species().species!=species.species)
+        impl_->entity(id).set<DispositionComponent>({definition.defaultDisposition});
+    impl_->nameHuman(id,species.species);
+}
+void SceneWorld::setCreatureCatalog(CreatureCatalog catalog) {
+    catalog.validate();
+    for (const auto &[id,handle] : impl_->entities) if (auto h=harvestable(id)) {
+        if (!catalog.harvestables.contains(h->definitionId)) throw std::invalid_argument("Harvest definition is in use.");
+        // Existing work and timers must retain the recipe they started with.
+        if (catalog.harvestables.at(h->definitionId)!=impl_->catalog.harvestables.at(h->definitionId))
+            throw std::invalid_argument("Create a new definition to change a recipe already assigned to nodes.");
+    }
+    for(auto id:impl_->creatureIds) {
+        auto e=findCreature(id);if(!catalog.permits(e->species(),e->vocation()))
+            throw std::invalid_argument("This change would invalidate an existing creature's species or vocation.");
+    }
+    Operation command(*this);
+    if(impl_->pending && !impl_->pending->catalogBefore)impl_->pending->catalogBefore=impl_->catalog;
+    const auto previous=impl_->catalog;impl_->catalog=std::move(catalog);
+    for(auto id:impl_->creatureIds) {
+        auto e=findCreature(id);const auto s=static_cast<std::uint32_t>(e->species().species);
+        if(previous.species.at(s).resources!=impl_->catalog.species.at(s).resources || previous.species.at(s).name!=impl_->catalog.species.at(s).name)
+            setCreatureIdentity(id,e->species(),e->vocation());
+    }
+}
+Guid SceneWorld::spawnCreature(CellPosition cell,SpeciesComponent species,VocationComponent vocation,ControlOwnership control) {
+    if(!impl_->catalog.permits(species,vocation))throw std::invalid_argument("Vocation is not permitted for this species.");
+    const auto& definition=impl_->catalog.species.at(static_cast<std::uint32_t>(species.species));
+    if(!isWalkable(cell))throw std::invalid_argument("Creature spawn cell is blocked.");
+    const auto bounds=worldBounds();
+    Entity draft(definition.name,ResourcePool(definition.resources.at(Resource::Health)),
+        Position(cellCenter(cell),cellSize(),{bounds.x,bounds.y}),control);
+    for(const auto &[key,maximum]:definition.resources)draft.setResource(key,ResourcePool(maximum));
+    if(impl_->used.size()>=maxGuidHistory)throw std::length_error("GUID history full.");
+    Operation command(*this);touchCreature(draft.id());
+    installCreature({draft.id(),draft.type(),control,draft.position(),species,vocation,{},definition.defaultDisposition},draft.resources());
+    return draft.id();
+}
+
+void SceneWorld::setCreatureDisposition(Guid id,Disposition disposition) {
+    dispositionName(disposition);
+    const auto actor=findCreature(id);
+    if(!actor)throw std::invalid_argument("Creature not found.");
+    if(actor->disposition()==disposition)return;
+    Operation command(*this);touchCreature(id);
+    impl_->entity(id).set<DispositionComponent>({disposition});
+}
+SceneWorld::AttackCheck SceneWorld::canAttack(Guid actorId,Guid targetId,bool requireAdjacent) const {
+    const auto actor=findCreature(actorId),target=findCreature(targetId);
+    if(!actor)return {false,"entity_removed"};
+    if(actor->health().depleted())return {false,"actor_dead"};
+    if(actorId==targetId)return {false,"self_target"};
+    if(!target)return {false,"target_removed"};
+    if(target->health().depleted())return {false,"target_dead"};
+    const auto a=actor->position().cellCoordinates(),b=target->position().cellCoordinates();
+    if(requireAdjacent && std::abs(a.x-b.x)+std::abs(a.y-b.y)!=1)return {false,"not_adjacent"};
+    if(requireAdjacent && !hasLineOfSight(a,b,true))return {false,"blocked"};
+    return {true,"ready"};
+}
+SceneWorld::AttackCheck SceneWorld::attack(Guid actor,Guid target) {
+    const auto check=canAttack(actor,target);
+    if(!check.allowed)return check;
+    adjustResource(target,Resource::Health,-attackDamage);
+    return {true,resource(target,Resource::Health)->depleted()?"target_defeated":"hit"};
+}
+bool SceneWorld::isEnemy(Guid actorId,Guid targetId) const {
+    const auto actor=findCreature(actorId),target=findCreature(targetId);
+    if(!actor || !target || actorId==targetId || actor->health().depleted() || target->health().depleted())return false;
+    if(actor->control()==ControlOwnership::Player && target->control()==ControlOwnership::Player)return false;
+    if(actor->disposition()==Disposition::Hostile)return target->disposition()!=Disposition::Hostile;
+    return target->disposition()==Disposition::Hostile;
+}
+std::vector<CellPosition> SceneWorld::attackPath(Guid actor,Guid target) const {
+    if(!canAttack(actor,target,false).allowed)return {};
+    const auto position=findCreature(target)->position().cellCoordinates();
+    std::vector<CellPosition> best;
+    for(auto cell:neighbors(position)) {
+        if(!hasLineOfSight(cell,position,true))continue;
+        auto path=creaturePath(actor,cell);
+        if(!path.empty() && (best.empty() || path.size()<best.size()))best=std::move(path);
+    }
+    return best;
+}
+std::vector<Guid> SceneWorld::nearbyCreatures(Guid actor,int radius) const {
+    if(radius<0 || radius>128)throw std::invalid_argument("Invalid creature perception radius.");
+    const auto e=findCreature(actor);if(!e)return {};
+    const auto center=e->position().cellCoordinates();
+    std::vector<Guid> found;
+    for(int cy=std::max(0,center.y-radius)/chunkSize;cy<=std::min(height()-1,center.y+radius)/chunkSize;++cy)
+        for(int cx=std::max(0,center.x-radius)/chunkSize;cx<=std::min(width()-1,center.x+radius)/chunkSize;++cx)
+            for(auto id:creaturesInChunk({cx,cy})) {
+                const auto other=findCreature(id);const auto p=other->position().cellCoordinates();
+                if(id!=actor && std::abs(p.x-center.x)+std::abs(p.y-center.y)<=radius && hasLineOfSight(center,p,true))found.push_back(id);
+            }
+    std::sort(found.begin(),found.end(),[&](Guid a,Guid b) {
+        const auto pa=findCreature(a)->position().cellCoordinates(),pb=findCreature(b)->position().cellCoordinates();
+        const int da=std::abs(pa.x-center.x)+std::abs(pa.y-center.y),db=std::abs(pb.x-center.x)+std::abs(pb.y-center.y);
+        return da==db?a.bytes<b.bytes:da<db;
+    });
+    return found;
+}
+std::optional<scene::Harvestable> SceneWorld::harvestable(Guid id) const {
+    auto e=impl_->entity(id);
+    return e && e.has<Harvestable>()?std::optional(e.get<Harvestable>()):std::nullopt;
+}
+void SceneWorld::touchHarvestable(Guid id) {
+    if (impl_->pending) impl_->pending->harvestBefore.try_emplace(id,harvestable(id));
+}
+void SceneWorld::setHarvestable(Guid id,const std::string &key) {
+    const auto object=findObject(id);
+    if (!object || object->type()!=ObjectType::Gatherable || !impl_->catalog.harvestables.contains(key))
+        throw std::invalid_argument("Harvestables require a Gatherable object and a valid definition.");
+    auto pools=resources(id).value_or(Resource{});
+    pools.set(Harvestable::Units,ResourcePool(static_cast<float>(impl_->catalog.harvestables.at(key).units)));
+    pools.set(Resource::Health,ResourcePool(100));
+    Operation command(*this);touchHarvestable(id);touchResources(id);
+    const auto cell=*objectPosition(id);const auto previous=harvestable(id);
+    const auto tile=previous?previous->sourceTile:at(cell).tile(GridLayer::Objects);
+    touch(cell);impl_->entity(id).set<Harvestable>({key,0,tile}).set<Resource>(pools).set<TileSprite>({tile});
+    impl_->terrain.cells_[index(cell)].tile(GridLayer::Objects)=tile;
+}
+void SceneWorld::removeHarvestable(Guid id) {
+    if (!harvestable(id)) return;
+    Operation command(*this);touchHarvestable(id);
+    const auto tile=harvestable(id)->sourceTile;const auto cell=*objectPosition(id);touch(cell);
+    impl_->entity(id).set<TileSprite>({tile});impl_->terrain.cells_[index(cell)].tile(GridLayer::Objects)=tile;
+    impl_->entity(id).remove<Harvestable>();removeResource(id,Harvestable::Units);
+}
+scene::HarvestCheck SceneWorld::canHarvest(Guid actorId,Guid target,bool adjacent) const {
+    const auto actor=findCreature(actorId);
+    if (!actor) return {false,"actor_removed"};
+    if (actor->health().depleted()) return {false,"actor_dead"};
+    const auto h=harvestable(target);
+    if (!h) return {false,"target_removed"};
+    const auto &d=impl_->catalog.harvestables.at(h->definitionId);
+    const auto pool=resource(target,Harvestable::Units);
+    if (!pool || pool->depleted()) return {false,"depleted"};
+    if (adjacent) {
+        const auto position=objectPosition(target);
+        const auto a=actor->position().cellCoordinates();
+        if (!position || std::abs(a.x-position->x)+std::abs(a.y-position->y)!=1)
+            return {false,"not_adjacent"};
+    }
+    if (!d.requiredTool.empty() && std::none_of(actor->inventory().begin(),actor->inventory().end(),
+        [&](const Item &item){return item.definitionId==d.requiredTool;})) return {false,"missing_tool"};
+
+    return {true,"ready"};
+}
+scene::HarvestCheck SceneWorld::completeHarvest(Guid actor,Guid target) {
+    const auto check=canHarvest(actor,target);
+    if (!check.allowed) return check;
+    const auto d=impl_->catalog.harvestables.at(harvestable(target)->definitionId);
+    const auto units=*resource(target,Harvestable::Units);
+    const auto health=resource(target,Resource::Health).value_or(ResourcePool(100,100*units.fraction()));
+    const float remaining=std::max(0.0f,units.current()-1);
+    // Integer units keep threshold crossings stable through save/load and competing workers.
+    const auto crossed=[&](float current){return 4-static_cast<int>(std::ceil(4.0*current/units.maximum()));};
+    const int bursts=crossed(remaining)-crossed(units.current());
+    const std::size_t count=bursts*d.yields.size();
+    std::vector<CellPosition> cells;
+    const auto center=*objectPosition(target);
+    for(int y=-4;y<=4;++y)for(int x=-4;x<=4;++x) {
+        const CellPosition cell{center.x+x,center.y+y};
+        if((x || y) && isWalkable(cell) && !objectAt(cell) && !creatureAt(cell))cells.push_back(cell);
+    }
+    if(cells.size()<count)return {false,"no_drop_space"};
+    if(impl_->used.size()+2*count>maxGuidHistory)return {false,"identity_limit"};
+    std::shuffle(cells.begin(),cells.end(),harvestRandom());
+    Operation command(*this);
+    std::size_t slot=0;
+    for(int burst=0;burst<bursts;++burst)for(auto item:d.yields) {
+        item.quantity=std::uniform_int_distribution<std::uint32_t>(1,item.quantity)(harvestRandom());
+        const auto cell=cells[slot++];
+        auto tile=at(cell).tile(GridLayer::Ground);
+        if(!tile.present())tile=harvestable(target)->sourceTile;
+        const auto drop=placeObject(cell,tile,ObjectType::Gatherable);
+        addItem(drop,item);
+    }
+    setResource(target,Resource::Health,ResourcePool(health.maximum(),health.maximum()*remaining/units.maximum()));
+    trySpendResource(target,Harvestable::Units,1);
+    if (resource(target,Harvestable::Units)->depleted() && d.removeWhenDepleted && inventory(target)->empty())
+        removeObjectById(target); // Never destroy separately carried/stored loot.
+    return {true,"harvested"};
+}
+std::vector<CellPosition> SceneWorld::harvestPath(Guid actor,Guid target) const {
+    const auto check=canHarvest(actor,target,false);
+    if (!check.allowed) return {};
+    const auto position=objectPosition(target);
+    std::vector<CellPosition> best;
+    for (auto cell:neighbors(*position,false,false)) {
+        auto path=creaturePath(actor,cell);
+        if (!path.empty() && (best.empty() || path.size()<best.size())) best=std::move(path);
+    }
+    return best;
+}
+std::vector<Guid> SceneWorld::nearbyHarvestables(Guid actor,int radius) const {
+    if (radius<0 || radius>128) throw std::invalid_argument("Invalid harvest perception radius.");
+    const auto e=findCreature(actor);if (!e) return {};
+    const auto center=e->position().cellCoordinates();
+    std::vector<Guid> found;
+    for (int cy=std::max(0,center.y-radius)/chunkSize;cy<=std::min(height()-1,center.y+radius)/chunkSize;++cy)
+        for (int cx=std::max(0,center.x-radius)/chunkSize;cx<=std::min(width()-1,center.x+radius)/chunkSize;++cx)
+            for (auto id:objectsInChunk({cx,cy})) if (harvestable(id)) {
+                const auto p=*objectPosition(id);
+                if (std::abs(p.x-center.x)+std::abs(p.y-center.y)<=radius) found.push_back(id);
+            }
+    std::sort(found.begin(),found.end(),[&](Guid a,Guid b) {
+        const auto pa=*objectPosition(a),pb=*objectPosition(b);
+        const int da=std::abs(pa.x-center.x)+std::abs(pa.y-center.y),db=std::abs(pb.x-center.x)+std::abs(pb.y-center.y);
+        return da==db?a.bytes<b.bytes:da<db;
+    });
+    return found;
+}
+std::optional<Guid> SceneWorld::createCarcass(Guid id) {
+    const auto actor=findCreature(id);
+    if (!actor || !actor->health().depleted()) return {};
+    const auto &species=impl_->catalog.species.at(static_cast<std::uint32_t>(actor->species().species));
+    if (species.carcassHarvest.empty()) return {};
+    auto cell=actor->position().cellCoordinates();
+    if (objectAt(cell)) {
+        const auto adjacent=neighbors(cell,false,true);
+        if (adjacent.empty()) return {}; // Keep the dead creature inert until space becomes available.
+        cell=adjacent.front();
+    }
+    if (impl_->used.size()>=maxGuidHistory) return {};
+    std::unordered_map<Guid,Resource,GuidHash> retained;
+    for (const auto &item:actor->inventory()) if (auto value=resources(item.guid)) retained.emplace(item.guid,*value);
+    Operation command(*this);touchCreature(id);touch(cell);
+    const auto corpseId=impl_->allocate();
+    Object corpse;corpse.id_=corpseId;corpse.type_=ObjectType::Gatherable;corpse.contents_=actor->inventory();
+    eraseCreature(id);
+    install(cell,corpse,species.carcassTile);
+    for (const auto &[child,value]:retained) impl_->entity(child).set<Resource>(value);
+    setHarvestable(corpseId,species.carcassHarvest);
+    return corpseId;
+}
+void SceneWorld::advanceHarvestLifecycle(double seconds) {
+    std::vector<Guid> creatures;
+    impl_->ecs.each([&](const PersistentId &id,const Creature &,const Resource &r) {
+        if (r.find(Resource::Health)->depleted()) creatures.push_back(id.value);
+    });
+    for (auto id:creatures) createCarcass(id);
+    std::vector<Guid> nodes;
+    impl_->ecs.each([&](const PersistentId &id,const Harvestable &h,const Resource &r) {
+        if (r.find(Harvestable::Units)->depleted() && impl_->catalog.harvestables.at(h.definitionId).regenerationSeconds>0)
+            nodes.push_back(id.value);
+    });
+    for (auto id:nodes) {
+        auto h=*harvestable(id);
+        auto pool=*resource(id,Harvestable::Units);
+        const auto &d=impl_->catalog.harvestables.at(h.definitionId);
+        if (!pool.depleted() || d.regenerationSeconds<=0) continue;
+        h.regenerationRemaining=std::max(0.0,h.regenerationRemaining-seconds);
+        if (h.regenerationRemaining<=1e-9) {
+            Operation command(*this);touchHarvestable(id);
+            pool.refill();setResource(id,Harvestable::Units,pool);
+        } else impl_->entity(id).set<Harvestable>(h);
+    }
+}
+
+void SceneWorld::collectGatherables() {
+    // Only inspect the four cells adjacent to living creatures, not every object in the map.
+    std::unordered_set<Guid,GuidHash> nearby;
+    for(auto id:creatureIds()) {
+        const auto actor=findCreature(id);
+        if(actor->health().depleted())continue;
+        for(auto cell:neighbors(actor->position().cellCoordinates()))if(auto object=objectAt(cell))
+            if(object->type()==ObjectType::Gatherable && !harvestable(object->id()) && !object->contents().empty())nearby.insert(object->id());
+    }
+    for(auto id:nearby) {
+        const auto object=findObject(id);if(!object)continue;
+        const auto cell=*objectPosition(id);
+        struct PickupStack { Item item; std::optional<Resource> resource; };
+        const auto planPickup=[&](const std::vector<Item> &inventory) {
+            std::vector<PickupStack> plan;
+            for(const auto &item:inventory)plan.push_back({item,resources(item.guid)});
+            for(auto item:object->contents()) {
+                const auto resource=resources(item.guid);
+                for(auto &target:plan) {
+                    if(target.item.definitionId!=item.definitionId || target.item.displayName!=item.displayName ||
+                       target.resource!=resource || target.item.quantity>=Inventory::gatherableStackLimit)continue;
+                    const auto moved=std::min(item.quantity,Inventory::gatherableStackLimit-target.item.quantity);
+                    target.item.quantity+=moved;item.quantity-=moved;
+                    if(!item.quantity)break;
+                }
+                while(item.quantity) {
+                    if(plan.size()==Inventory::maxStacks)return std::vector<PickupStack>{};
+                    auto part=item;part.quantity=std::min(item.quantity,Inventory::gatherableStackLimit);
+                    plan.push_back({part,resource});item.quantity-=part.quantity;item.guid={};
+                }
+            }
+            return plan;
+        };
+        std::vector<Guid> players,others;
+        for(auto adjacent:neighbors(cell))if(auto occupant=creatureAt(adjacent)) {
+            const auto actor=findCreature(*occupant);
+            if(actor->health().depleted() || planPickup(actor->inventory()).empty())continue;
+            (actor->control()==ControlOwnership::Player?players:others).push_back(*occupant);
+        }
+        const auto &eligible=players.empty()?others:players;
+        if(eligible.empty())continue;
+        const auto recipient=eligible[std::uniform_int_distribution<std::size_t>(0,eligible.size()-1)(harvestRandom())];
+        auto plan=planPickup(*inventory(recipient));
+        const auto newStacks=std::count_if(plan.begin(),plan.end(),[](const auto &entry){return entry.item.guid.empty();});
+        if(impl_->used.size()+newStacks>maxGuidHistory)continue;
+        Operation command(*this);touch(cell);touchCreature(recipient);
+        std::uint32_t order=0;
+        for(auto &entry:plan) {
+            auto &item=entry.item;
+            if(item.guid.empty())item.guid=impl_->allocate();
+            touchResources(item.guid);
+            auto child=impl_->entity(item.guid);
+            if(!child) {
+                child=impl_->create(item.guid);
+                const auto definition=impl_->itemKeys.find(item.definitionId);
+                if(definition!=impl_->itemKeys.end())child.is_a(impl_->entity(definition->second));
+            }
+            child.set<ItemStack>({item.definitionId,item.displayName,item.quantity})
+                 .add<ContainedBy>(impl_->entity(recipient)).set<ItemOrder>({order++});
+            if(entry.resource)child.set<Resource>(*entry.resource);
+        }
+        removeObjectById(id); // Also retires source stacks that were fully merged.
+    }
 }

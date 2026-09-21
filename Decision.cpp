@@ -54,7 +54,7 @@ Config Config::load(const std::string &path) {
     AI_FIELD(version); AI_FIELD(provider); AI_FIELD(proxyUrl); AI_FIELD(seed); AI_FIELD(batchSize);
     AI_FIELD(perceptionRadius); AI_FIELD(candidateCount); AI_FIELD(rerouteAttempts); AI_FIELD(payloadBytes);
     AI_FIELD(requestsPerSecond); AI_FIELD(timeout); AI_FIELD(queueWait); AI_FIELD(backoffMin); AI_FIELD(backoffMax);
-    AI_FIELD(moveStepSeconds); AI_FIELD(waitSeconds); AI_FIELD(trace);
+    AI_FIELD(moveStepSeconds); AI_FIELD(waitSeconds); AI_FIELD(trace); AI_FIELD(managedProxy);
 #undef AI_FIELD
     if (j.contains("bands")) {
         if (!j.at("bands").is_array() || j.at("bands").size() != 5) throw std::invalid_argument("Expected five AI bands.");
@@ -68,6 +68,102 @@ Json GoalRecord::json() const {
             {"source",source},{"status",status},{"result",result}};
 }
 ActionRegistry::ActionRegistry() {
+    add("attack", {
+        "Approach a living target by a four-way path; deal 10 health damage each second while cardinally adjacent. Repeat until defeated or cancelled. Hostile and non-hostile entities are enemies; neutral actors are passive locally. Explicit orders may attack any other living entity.",
+        [](const SceneWorld &world,Guid id,const Config &c,std::mt19937 &) {
+            if(world.findCreature(id)->disposition()==scene::Disposition::Neutral)return std::vector<Json>{};
+            auto targets=world.nearbyCreatures(id,c.perceptionRadius);
+            std::stable_sort(targets.begin(),targets.end(),[&](Guid a,Guid b){return world.isEnemy(id,a)>world.isEnemy(id,b);});
+            std::vector<Json> result;int examined=0;
+            for(auto target:targets) {
+                if(++examined>32 || result.size()>=static_cast<std::size_t>(c.candidateCount-1))break;
+                const auto victim=world.findCreature(target);
+                if(victim->health().depleted() || !world.isEnemy(id,target))continue;
+                if(world.findCreature(id)->control()==ControlOwnership::Player && victim->control()==ControlOwnership::Player)continue;
+                const auto path=world.attackPath(id,target);if(path.empty())continue;
+                result.push_back({{"action","attack"},{"parameters",{{"target",target.toString()}}},
+                    {"targetDisposition",scene::dispositionName(victim->disposition())},{"enemy",world.isEnemy(id,target)},
+                    {"targetHealth",victim->health().current()},{"pathSteps",path.size()-1}});
+            }
+            return result;
+        },
+        [](const SceneWorld &world,Guid id,const Json &p) {
+            try{return !world.attackPath(id,Guid::fromString(p.at("target"))).empty();}
+            catch(const std::exception &){return false;}
+        },
+        [](SceneWorld &world,Execution &e,double dt,const Config &c) {
+            const auto target=Guid::fromString(e.goal.parameters.at("target"));
+            const auto check=world.canAttack(e.goal.entity,target,false);
+            if(!check.allowed){complete(e,check.reason=="target_dead"?"succeeded":"failed",check.reason);return;}
+            // Autonomous attacks stop when dispositions cease to identify an enemy.
+            if((e.goal.source=="fallback" || e.goal.source=="jev") &&
+               (world.findCreature(e.goal.entity)->disposition()==scene::Disposition::Neutral || !world.isEnemy(e.goal.entity,target))) {
+                complete(e,"cancelled","no_longer_enemy");return;
+            }
+            if(!world.canAttack(e.goal.entity,target).allowed) {
+                e.workElapsed=0;e.elapsed+=dt;
+                if(e.elapsed<c.moveStepSeconds)return;
+                e.elapsed=0;e.path=world.attackPath(e.goal.entity,target);
+                if(e.path.size()<2 || !world.moveCreature(e.goal.entity,e.path[1])) {
+                    if(e.reroutes++>=c.rerouteAttempts)complete(e,"failed","unreachable");
+                } else e.reroutes=0;
+                return;
+            }
+            e.elapsed=0;e.workElapsed+=dt;
+            if(e.workElapsed+1e-9<SceneWorld::attackSeconds)return;
+            e.workElapsed=0;
+            const auto hit=world.attack(e.goal.entity,target);
+            if(!hit.allowed)complete(e,"failed",hit.reason);
+            else if(hit.reason=="target_defeated")complete(e,"succeeded",hit.reason);
+        }
+    });
+    add("harvest", {
+        scene::Harvestable::RulesDescription,
+        [](const SceneWorld &world, Guid id, const Config &c, std::mt19937 &) {
+            std::vector<Json> result;
+            int examined=0;
+            for (auto target:world.nearbyHarvestables(id,c.perceptionRadius)) {
+                if (++examined>32 || result.size()>=static_cast<std::size_t>(c.candidateCount-1)) break;
+                if (world.harvestPath(id,target).empty()) continue;
+                const auto h=*world.harvestable(target);
+                const auto &d=world.creatureCatalog().harvestables.at(h.definitionId);
+                auto recipe=d.json();recipe.erase("depletedState");recipe.erase("regenerationSeconds");recipe.erase("removeWhenDepleted");
+                result.push_back({{"action","harvest"},{"parameters",{{"target",target.toString()}}},
+                    {"source",recipe},{"remaining",world.resource(target,scene::Harvestable::Units)->current()}});
+            }
+            return result;
+        },
+        [](const SceneWorld &world, Guid id,const Json &p) {
+            try {return !world.harvestPath(id,Guid::fromString(p.at("target"))).empty();}
+            catch(const std::exception &) {return false;}
+        },
+        [](SceneWorld &world,Execution &e,double dt,const Config &c) {
+            const auto target=Guid::fromString(e.goal.parameters.at("target"));
+            const auto check=world.canHarvest(e.goal.entity,target,false);
+            if (!check.allowed) {complete(e,"failed",check.reason);return;}
+            const auto definition=world.harvestable(target)->definitionId;
+            if(e.harvestDefinition.empty())e.harvestDefinition=definition;
+            else if(e.harvestDefinition!=definition){complete(e,"failed","target_changed");return;}
+            if (!world.canHarvest(e.goal.entity,target).allowed) {
+                e.workElapsed=0;e.elapsed+=dt;
+                if(e.elapsed<c.moveStepSeconds)return;
+                e.elapsed=0;
+                e.path=world.harvestPath(e.goal.entity,target);
+                if(e.path.size()<2 || !world.moveCreature(e.goal.entity,e.path[1])) {
+                    if(e.reroutes++>=c.rerouteAttempts)complete(e,"failed","unreachable");
+                }
+                return;
+            }
+            e.elapsed=0;
+            const auto &d=world.creatureCatalog().harvestables.at(world.harvestable(target)->definitionId);
+            e.workElapsed+=dt;
+            if(e.workElapsed+1e-9<d.workSeconds)return;
+            const auto result=world.completeHarvest(e.goal.entity,target);
+            if(!result.allowed){complete(e,"failed",result.reason);return;}
+            e.workElapsed=0;
+            if(!world.harvestable(target) || world.resource(target,scene::Harvestable::Units)->depleted())complete(e,"succeeded","harvested");
+        }
+    });
     add("move", {
         "Move to the destination cell using a four-way path. Blocked steps are rerouted; unrecoverable paths fail.",
         [](const SceneWorld &world, Guid id, const Config &c, std::mt19937 &rng) {
@@ -129,10 +225,27 @@ void ActionRegistry::add(std::string name, ActionDefinition def) {
 }
 const ActionDefinition &ActionRegistry::at(const std::string &name) const { return definitions_.at(name); }
 void ActionRegistry::tick(SceneWorld &world, Execution &e, double dt, const Config &config) const {
+    if (!std::isfinite(dt) || dt<0) throw std::invalid_argument("Invalid action time.");
+    if (e.goal.status=="pending" || e.goal.status=="running") {
+        const auto actor=world.findCreature(e.goal.entity);
+        if (!actor || actor->health().depleted()) {complete(e,"cancelled",actor?"actor_dead":"entity_removed");return;}
+    }
     if (e.goal.status == "pending") e.goal.status = "running";
     if (e.goal.status == "running") at(e.goal.action).execute(world,e,dt,config);
 }
 DecisionContextBuilder::DecisionContextBuilder() {
+    add("identity","Species, subspecies and vocation describe this creature; they do not grant actions.",[](const SceneWorld& w,Guid id){
+        const auto e=w.findCreature(id);const auto s=static_cast<std::uint32_t>(e->species().species);
+        const auto& catalog=w.creatureCatalog();const auto& species=catalog.species.at(s);
+        return Json{{"species",species.name},{"subSpecies",species.subSpecies.at(static_cast<std::uint32_t>(e->species().subSpecies))},
+            {"vocation",e->vocation().id?catalog.vocations.at(e->vocation().id).name:"Unassigned"},
+            {"disposition",scene::dispositionName(e->disposition())}};
+    });
+    add("resources",scene::Resource::RulesDescription,[](const SceneWorld& w,Guid id){
+        const auto actor=w.findCreature(id);Json pools=Json::object();for(const auto& [key,pool]:actor->resources().pools())
+            if(key!=scene::Resource::Health)pools[key]={{"current",pool.current()},{"maximum",pool.maximum()}};
+        return pools;
+    });
     add("health",scene::Resource::HealthRulesDescription,[](const SceneWorld &w, Guid id) {
         const auto h = w.resource(id,scene::Resource::Health).value();
         return Json{{"current",h.current()},{"maximum",h.maximum()}};
@@ -160,20 +273,42 @@ Json DecisionContextBuilder::build(const SceneWorld &world, Guid id, const Json 
     for (const auto &[name, entry] : contributors_) {
         result["self"][name] = entry.fetch(world,id); result["rules"][name] = entry.rules;
     }
+    const auto nearby=world.nearbyCreatures(id,c.perceptionRadius);
+    result["nearbyEntities"]=Json::array();
+    result["nearbyEntityCount"]=nearby.size();
+    if(!nearby.empty())result["rules"]["nearbyEntities"]="Visible entities within Manhattan radius, nearest first. List may be truncated; count is total visible. Disposition is intrinsic; enemy is relative to self. Neutral is passive; friendly avoids non-hostile targets.";
+    for(auto target:nearby) {
+        if(result["nearbyEntities"].size()>=16)break;
+        const auto other=world.findCreature(target);
+        const auto &species=world.creatureCatalog().species.at(static_cast<std::uint32_t>(other->species().species));
+        result["nearbyEntities"].push_back({{"id",target.toString()},{"species",species.name},
+            {"disposition",scene::dispositionName(other->disposition())},{"enemy",world.isEnemy(id,target)},
+            {"control",other->control()==ControlOwnership::Player?"player":"AI"},
+            {"cell",cellJson(other->position().cellCoordinates())},
+            {"health",{{"current",other->health().current()},{"maximum",other->health().maximum()}}}});
+    }
     for (const auto &[name, action] : actions.definitions()) {
-        result["rules"][name] = action.rules;
+        if(name!="harvest" && name!="attack") result["rules"][name] = action.rules;
         if (name == "wait") continue;
         for (auto candidate : action.candidates(world,id,c,rng)) {
             if (result["candidates"].size() >= static_cast<std::size_t>(c.candidateCount-1)) break;
             if (previous.is_object() && previous.value("status","") == "failed" &&
                 previous.value("action","") == name && previous.at("parameters") == candidate.at("parameters")) continue;
             result["candidates"].push_back(std::move(candidate));
+            result["rules"][name] = action.rules;
         }
     }
     result["candidates"].push_back(actions.at("wait").candidates(world,id,c,rng).at(0));
     for (std::size_t i=0;i<result["candidates"].size();++i) result["candidates"][i]["id"] = "c" + std::to_string(i);
-    while (result.dump().size() > static_cast<std::size_t>(c.payloadBytes) && result["candidates"].size() > 1)
+    while(result.dump().size()>static_cast<std::size_t>(c.payloadBytes) && !result["nearbyEntities"].empty())
+        result["nearbyEntities"].erase(result["nearbyEntities"].end()-1);
+    while (result.dump().size() > static_cast<std::size_t>(c.payloadBytes) && result["candidates"].size() > 1) {
         result["candidates"].erase(result["candidates"].begin());
+        if(std::none_of(result["candidates"].begin(),result["candidates"].end(),[](const Json &candidate){return candidate.at("action")=="harvest";}))
+            result["rules"].erase("harvest");
+        if(std::none_of(result["candidates"].begin(),result["candidates"].end(),[](const Json &candidate){return candidate.at("action")=="attack";}))
+            result["rules"].erase("attack");
+    }
     if (result.dump().size() > static_cast<std::size_t>(c.payloadBytes)) throw std::length_error("Required decision context exceeds payload limit.");
     return result;
 }
@@ -211,8 +346,9 @@ void DecisionSystem::sync() {
     roster_.clear(); players_.clear();
     std::unordered_set<Guid,GuidHash> present;
     for (auto id : all) {
+        present.insert(id);states_.try_emplace(id);
         if (world_.findCreature(id)->control() == ControlOwnership::Player) players_.push_back(id);
-        else { present.insert(id); roster_.push_back(id); states_.try_emplace(id); }
+        else roster_.push_back(id);
     }
     for (auto it=states_.begin();it!=states_.end();) {
         if (!present.contains(it->first)) {
@@ -242,6 +378,9 @@ void DecisionSystem::finish(Guid, State &s) {
     s.execution.reset();
 }
 bool DecisionSystem::assign(Guid id, const std::string &name, Json p, std::string source) {
+    sync();
+    const auto actor=world_.findCreature(id);
+    if (!actor || actor->health().depleted()) return false;
     auto it = states_.find(id); if (it == states_.end()) return false;
     try { if (!actions_.at(name).validate(world_,id,p)) return false; }
     catch (const std::exception &) { return false; }
@@ -266,7 +405,14 @@ void DecisionSystem::fallback(Guid id, State &s) {
     try {
         auto candidates = snapshot(id,s).at("candidates");
         std::vector<Json> moves;
-        for (const auto &c : candidates) if (c.at("action") != "wait") moves.push_back(c);
+        for (const auto &c : candidates) {
+            if(c.at("action")=="attack") {
+                if(world_.findCreature(id)->disposition()!=scene::Disposition::Neutral && c.value("enemy",false) &&
+                   assign(id,"attack",c.at("parameters"))) {++metrics_[s.band].fallback;return;}
+                continue;
+            }
+            if(c.at("action")!="wait")moves.push_back(c);
+        }
         const auto choice = moves.empty() ? candidates.back() : moves[std::uniform_int_distribution<std::size_t>(0,moves.size()-1)(rng_)];
         if (assign(id,choice.at("action"),choice.at("parameters"))) { ++metrics_[s.band].fallback; return; }
     } catch (const std::exception &) {}
@@ -321,6 +467,7 @@ void DecisionSystem::update(double dt, double wall, bool paused) {
     const auto work = std::min<std::size_t>(config_.batchSize,roster_.size());
     for (std::size_t i=0;i<work;++i) {
         const auto id = roster_[cursor_++ % roster_.size()]; auto &s = states_.at(id); ++lastBatch_;
+        if (world_.findCreature(id)->health().depleted()) continue;
         if (s.execution || (flight_ && flight_->entity == id)) continue;
         s.band = bandFor(id);
         const bool available = transport_ && config_.provider != "fallback-only" && wall >= backoffUntil_;
@@ -356,6 +503,14 @@ void DecisionSystem::update(double dt, double wall, bool paused) {
             if (flight_) remoteFailure(wall); else fallback(id,s);
         }
         break;
+    }
+}
+void DecisionSystem::step(double dt) {
+    if (!paused_ || !std::isfinite(dt) || dt < 0) throw std::invalid_argument("AI step requires a paused session.");
+    time_ += dt; sync();
+    for (auto &[id,state] : states_) if (state.execution) {
+        actions_.tick(world_,*state.execution,dt,config_);
+        if (state.execution->goal.status != "pending" && state.execution->goal.status != "running") finish(id,state);
     }
 }
 void DecisionSystem::invalidate() {

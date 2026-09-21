@@ -25,6 +25,7 @@ private:
     std::string error_;
     const SceneWorld* grid_ = nullptr;
     std::size_t itemChoice_ = 0;
+    std::string harvestId_;
     void resetDraft(const Object& object);
     void clampScroll(int height);
 };

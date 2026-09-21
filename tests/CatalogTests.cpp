@@ -38,7 +38,8 @@ int main(int argc,char** argv) {
         std::ifstream in(file,std::ios::binary);std::string data{std::istreambuf_iterator<char>(in),{}};in.close();
         const auto write=[&](const std::string& bytes){std::ofstream out(file,std::ios::binary|std::ios::trunc);out.write(bytes.data(),bytes.size());};
         const auto identities=grid.guidState();
-        std::size_t metadata=16+identities.used.size()*16;
+        // Strip v4 identities plus v5-v7 empty pools/creatures and definition extension.
+        std::size_t metadata=16+identities.used.size()*16+20+grid.creatureCatalog().json().dump().size();
         for(const auto& [key,id]:identities.items) metadata+=4+key.size()+16;
         for(const auto& [key,id]:identities.types) metadata+=4+key.size()+16;
         for(const auto& [owner,items]:identities.contents) metadata+=20+items.size()*16;

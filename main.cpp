@@ -13,6 +13,8 @@
 #include "WorldCamera.h"
 #include "TilesetEditor.h"
 #include "PlaySession.h"
+#include "EntityPresentation.h"
+#include "PlayerController.h"
 #include <raylib.h>
 
 namespace {
@@ -45,7 +47,8 @@ int main(int argc, char* argv[])
             else throw std::runtime_error("Usage: JevSimulation [--game | --ai-demo | --ai-stress] [--ai-config path] [--window-smoke-test] | --dry-run | --jev-smoke-test");
         }
         if(aiDemo || aiStress) return runAIDemo(aiConfig,aiStress,smokeTest);
-        const auto decisionConfig=ai::Config::load(aiConfig);
+        auto decisionConfig=ai::Config::load(aiConfig);
+        if (smokeTest) decisionConfig.provider="fake";
         if(dryRun && (gameMode || smokeTest))throw std::runtime_error("--dry-run is a standalone headless mode.");
         std::vector<std::wstring> arguments{JevTestScript};
         if (dryRun || smokeTest) arguments.emplace_back(L"--dry-run");
@@ -55,10 +58,13 @@ int main(int argc, char* argv[])
         }
 
         GameWindow window(smokeTest);
+        EntityPresentation presentation(std::filesystem::path(JevProjectDirectory)/"Assets");
+        bool gamePaused=false;
         SceneWorld grid;
         std::unique_ptr<ai::DecisionSystem> decisions;
         SceneWorld *decisionWorld=nullptr;
         double lastDecisionTime=0;
+        PlayerController players;
         TilesetLibrary tilesets(JevTilesetDirectory);
         TilesetEditor authorEditor(tilesets,true);
         std::unique_ptr<TilesetEditor> runtimeEditor;
@@ -79,7 +85,7 @@ int main(int argc, char* argv[])
                     grid.markSaved();
                     mapStatus = "Saved Maps/world.jevmap";
                 } else {
-                    decisions.reset(); decisionWorld=nullptr;
+                    decisions.reset(); decisionWorld=nullptr; players.clear();
                     auto loaded = loadMap(JevMapFile, catalog);
                     grid = std::move(loaded);
                     grid.setHistoryEnabled(true);
@@ -99,6 +105,12 @@ int main(int argc, char* argv[])
         };
         std::error_code mapFileError;
         if (!smokeTest && std::filesystem::exists(JevMapFile, mapFileError)) mapAction(MapAction::Load);
+        if (smokeTest) {
+            GridCell floor; floor.tile(GridLayer::Ground)={0,0,0};
+            grid.fillRegion({1020,1020,1032,1032},floor);
+            grid.spawnCreature({1024,1024},"player",ControlOwnership::Player);
+            grid.spawnCreature({1026,1024}); grid.spawnCreature({1027,1026});
+        }
         grid.setHistoryEnabled(true);
 
         std::unique_ptr<NodeProcess> node;
@@ -111,9 +123,11 @@ int main(int argc, char* argv[])
         }
 
         bool smokePlayStarted=false,smokePlayStopped=false;
+        std::uint64_t smokeDecisionRequests=0;
         int frames = 0;
         int framesAfterResult = 0;
         while (!WindowShouldClose()) {
+            bool singleStep=false;
             auto input = EditorInput::read();
             if(smokeTest && !gameMode && (frames==10 || frames==30 || frames==31 || frames==50)){
                 input.mouse={frames==10?570.0f:frames==30?652.0f:frames==31?740.0f:830.0f,60};
@@ -121,6 +135,7 @@ int main(int argc, char* argv[])
             }
             auto* activeWorld=play.active()?&play.world():&grid;
             auto* editor=play.active()?runtimeEditor.get():&authorEditor;
+            if (gameMode && IsKeyPressed(KEY_SPACE)) gamePaused=!gamePaused;
             worldCamera.resize(GetScreenWidth(), GetScreenHeight());
             if (gameMode || !editor->capturesKeyboard()) worldCamera.update(GetFrameTime(), gameMode || !editor->capturesMouse(input.mouse));
             if(!gameMode){
@@ -134,9 +149,9 @@ int main(int argc, char* argv[])
                         authorEditor.finishStroke(grid);play.start(grid);authorCamera=worldCamera;smokePlayStarted=true;
                         runtimeEditor=std::make_unique<TilesetEditor>(tilesets,true);runtimeEditor->setPlayState(true,false);
                     } else if(transport==TransportAction::Pause)play.pause(!play.paused());
-                    else if(transport==TransportAction::Step)play.step();
+                    else if(transport==TransportAction::Step){singleStep=play.paused();play.step();}
                     else if(transport==TransportAction::Stop && play.active()){
-                        decisions.reset(); decisionWorld=nullptr;
+                        decisions.reset(); decisionWorld=nullptr; players.clear();
                         play.stop(grid);smokePlayStopped=true;runtimeEditor.reset();worldCamera=*authorCamera;authorCamera.reset();
                     }
                 }catch(const std::exception& error){mapStatus=error.what();mapError=true;}
@@ -144,18 +159,29 @@ int main(int argc, char* argv[])
                 editor=play.active()?runtimeEditor.get():&authorEditor;
                 editor->setPlayState(play.active(),play.paused());
                 play.advance(GetFrameTime());
-            }else gameStepper.advance(grid,GetFrameTime());
+            }else if (!gamePaused) gameStepper.advance(grid,GetFrameTime());
             if (gameMode || play.active()) {
                 if (decisionWorld != activeWorld) {
+                    players.clear();
                     decisions.reset(); std::unique_ptr<ai::Transport> transport;
                     if (decisionConfig.provider=="proxy") transport=std::make_unique<ai::BridgeTransport>(
-                        JevNodeExecutable,JevDecisionBridge,JevProjectDirectory,decisionConfig.proxyUrl,decisionConfig.timeout);
+                        JevNodeExecutable,JevDecisionBridge,JevProjectDirectory,decisionConfig.proxyUrl,decisionConfig.timeout,
+                        decisionConfig.managedProxy ? std::filesystem::absolute(aiConfig).wstring() : std::wstring{});
                     decisions=std::make_unique<ai::DecisionSystem>(*activeWorld,decisionConfig,std::move(transport));
                     decisionWorld=activeWorld; lastDecisionTime=activeWorld->simulationTime();
                 }
                 const auto time=activeWorld->simulationTime();
-                if (time > lastDecisionTime || (play.active() && play.paused()))
-                    decisions->update(std::max(0.0,time-lastDecisionTime),GetTime(),play.active() && play.paused());
+                PlayerInput playerInput;
+                playerInput.mouse=input.mouse;playerInput.leftPressed=input.leftPressed;playerInput.leftDown=input.leftDown;
+                playerInput.leftReleased=IsMouseButtonReleased(MOUSE_BUTTON_LEFT);playerInput.rightPressed=input.rightPressed;
+                playerInput.shift=input.shift;playerInput.cancel=IsKeyPressed(KEY_X);playerInput.focused=input.focused;
+                playerInput.keyboardInput=gameMode || !editor->textInputActive();
+                playerInput.worldInput=playerInput.keyboardInput && (gameMode || !editor->capturesMouse(input.mouse));
+                players.update(*activeWorld,*decisions,worldCamera.camera(),playerInput,GetFrameTime());
+                const bool paused=gameMode?gamePaused:play.paused();
+                if (time > lastDecisionTime || paused)
+                    decisions->update(std::max(0.0,time-lastDecisionTime),GetTime(),paused);
+                if (singleStep) decisions->step(std::max(0.0,time-lastDecisionTime));
                 lastDecisionTime=time;
             }
             if (smokeTest) worldCamera.pan({1, 1}, 1.0f / 60);
@@ -179,11 +205,13 @@ int main(int argc, char* argv[])
             BeginDrawing();
             ClearBackground(Color{22, 26, 34, 255});
             BeginMode2D(worldCamera.camera());
-            activeWorld->draw(worldCamera.visibleBounds(), &tilesets);
+            activeWorld->draw(worldCamera.visibleBounds(), &tilesets, &presentation);
             const auto hovered = activeWorld->worldToCell(GetScreenToWorld2D(GetMousePosition(), worldCamera.camera()));
-            if (hovered && (gameMode || !editor->capturesMouse(input.mouse))) DrawRectangleLinesEx(activeWorld->cellBounds(*hovered), 1 / worldCamera.camera().zoom, SKYBLUE);
-            if(!gameMode)editor->drawBrush(*activeWorld, worldCamera.camera(), input.mouse);
+            if (hovered && (gameMode || !editor->capturesMouse(input.mouse))) presentation.drawHover(activeWorld->cellBounds(*hovered),GetTime());
+            if(decisions)players.drawWorld(*activeWorld,worldCamera.camera(),*decisions);
+            if(!gameMode && editor->layer()!=GridLayer::Entities)editor->drawBrush(*activeWorld, worldCamera.camera(), input.mouse);
             EndMode2D();
+            if(decisions)players.drawScreen(worldCamera.camera());
             const int hudX = !gameMode && editor->visible() ? TilesetEditor::panelWidth + 12 : 12;
             const int hudY = !gameMode && editor->visible() ? 90 : 12;
             DrawRectangle(hudX, hudY, 410, 70, Color{15, 19, 26, 225});
@@ -191,12 +219,30 @@ int main(int argc, char* argv[])
             if (hovered && (gameMode || !editor->capturesMouse(input.mouse)))
                 DrawText(TextFormat("Cell %d, %d  |  %s", hovered->x, hovered->y,
                     activeWorld->isWalkable(*hovered) ? "Walkable" : "Not walkable"), hudX + 12, hudY + 38, 16, SKYBLUE);
+            if(decisions) {
+                std::string status=std::to_string(players.selection().size())+" selected | Drag / Shift: select | Right-click: move / harvest / attack | X: stop";
+                DrawRectangle(hudX,hudY+108,GetScreenWidth()-hudX-12,26,{15,19,26,225});
+                BeginScissorMode(hudX+8,hudY+110,GetScreenWidth()-hudX-28,22);
+                DrawText(status.c_str(),hudX+8,hudY+113,14,LIGHTGRAY);EndScissorMode();
+                DrawRectangle(hudX,hudY+138,GetScreenWidth()-hudX-12,24,{15,19,26,225});
+                BeginScissorMode(hudX+8,hudY+139,GetScreenWidth()-hudX-28,22);
+                DrawText(players.status().c_str(),hudX+8,hudY+143,14,LIGHTGRAY);EndScissorMode();
+            }
             if(!gameMode)editor->draw(GetScreenHeight());
+            if (smokeTest && decisions) {
+                const auto stats=decisions->metrics();
+                std::uint64_t requests=0;
+                for (const auto &band:stats.at("bands")) requests+=band.at("requests").get<std::uint64_t>();
+                smokeDecisionRequests=std::max(smokeDecisionRequests,requests);
+            }
             DrawRectangle(hudX, GetScreenHeight() - 32, GetScreenWidth() - hudX - 12, 24, Color{15, 19, 26, 225});
             BeginScissorMode(hudX + 8, GetScreenHeight() - 30, GetScreenWidth() - hudX - 28, 22);
             DrawText((play.active()?std::string(play.paused()?"Play paused | ":"Play running | ")+std::to_string(activeWorld->ticks())+" ticks | Runtime changes discarded on Stop":(grid.dirty()?"* Unsaved | ":"")+mapStatus).c_str(), hudX + 8, GetScreenHeight() - 28, 16, mapError ? RED : LIGHTGRAY);
             EndScissorMode();
             DrawFPS(GetScreenWidth()-80, !gameMode && editor->visible() ? 86 : 0);
+            if (gameMode) DrawText(gamePaused?"PAUSED | Space: resume":"Space: pause to inspect entities",12,GetScreenHeight()-56,16,SKYBLUE);
+            presentation.drawTooltip(*activeWorld,(gameMode || !editor->capturesMouse(input.mouse))?hovered:std::nullopt,
+                gameMode?gamePaused:(play.active() && play.paused()),input.mouse);
             EndDrawing();
 
             if (result) ++framesAfterResult;
@@ -205,6 +251,7 @@ int main(int argc, char* argv[])
         }
         if(smokeTest && !gameMode && (!smokePlayStarted || !smokePlayStopped || play.active()))throw std::runtime_error("Play smoke test failed to stop.");
         if(smokeTest && gameMode && grid.ticks()==0)throw std::runtime_error("Game mode did not simulate.");
+        if(smokeTest && !smokeDecisionRequests) throw std::runtime_error("Main executable did not dispatch AI decisions.");
         if(decisions) std::cout << decisions->metrics().dump() << std::endl;
         decisions.reset();
         if(play.active())play.stop(grid);

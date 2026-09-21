@@ -3,6 +3,7 @@
 #include "PlaySession.h"
 #include <iostream>
 #include <set>
+#include <fstream>
 using namespace ai;
 void check(bool condition,const char *message) { if (!condition) throw std::runtime_error(message); }
 template<class F> void rejects(F f) { bool caught=false; try { f(); } catch(const std::exception&) { caught=true; } check(caught,"Invalid operation accepted"); }
@@ -18,6 +19,39 @@ class Controlled : public Transport {
 };
 int main(int argc,char **argv) {
  try {
+    {
+        SceneWorld speciesWorld(8,8);ground(speciesWorld);speciesWorld.setHistoryEnabled(true);
+        auto catalog=speciesWorld.creatureCatalog();
+        catalog.species.at(0).resources["thirst"]=100;
+        scene::SpeciesDefinition zombie;zombie.name="Zombie";zombie.sheet="Monsters.png";zombie.subSpecies.emplace(1,"Walker");
+        // Undead explicitly opt out of the living species' default needs.
+        zombie.resources={{scene::Resource::Health,100}};
+        catalog.species.emplace(1,zombie);catalog.vocations.emplace(1,scene::VocationDefinition{"Guard",{{0,{}}}});
+        speciesWorld.setCreatureCatalog(catalog);
+        check(speciesWorld.canUndo(),"Catalog edits enter undo history");speciesWorld.undo();check(speciesWorld.creatureCatalog().species.size()==1,"Undo catalog");speciesWorld.redo();
+        const auto human=speciesWorld.spawnCreature({0,0},scene::SpeciesComponent{},scene::VocationComponent{1},ControlOwnership::Player);
+        const scene::SpeciesComponent undead{static_cast<scene::Species>(1),static_cast<scene::SubSpecies>(1)};
+        const auto z=speciesWorld.spawnCreature({1,0},undead,{},ControlOwnership::AI);
+        check(speciesWorld.findCreature(human)->resources().find("thirst") && !speciesWorld.findCreature(z)->resources().find("thirst"),"Species controls resources");
+        rejects([&]{speciesWorld.setCreatureIdentity(z,undead,{1});});
+        auto invalid=catalog;invalid.vocations.at(1).species.clear();rejects([&]{speciesWorld.setCreatureCatalog(invalid);});
+        speciesWorld.setCreatureIdentity(human,undead,{});check(!speciesWorld.findCreature(human)->resources().find("thirst"),"Reassignment removes irrelevant resources");
+        speciesWorld.undo();check(speciesWorld.findCreature(human)->vocation().id==1 && speciesWorld.findCreature(human)->resources().find("thirst"),"Undo restores components");
+        auto changed=catalog;changed.species.at(0).resources["thirst"]=50;speciesWorld.setCreatureCatalog(changed);
+        check(speciesWorld.findCreature(human)->resources().find("thirst")->maximum()==50,"Catalog resource changes reconcile instances");
+        const auto document=speciesWorld.document();auto cloned=SceneWorld::fromDocument(document);
+        check(cloned.findCreature(z)==speciesWorld.findCreature(z) && cloned.creatureCatalog()==changed,"Species and vocation survive cloning");
+        if(argc>1){speciesWorld.placeObject({3,3},{0,0,0},ObjectType::Container);
+            const std::string path=std::string(argv[1])+".species";saveMap(path,speciesWorld,{{"test.png",8,8}});
+            auto loaded=loadMap(path,{{"test.png",8,8}});check(loaded.findCreature(z)==speciesWorld.findCreature(z) && loaded.creatureCatalog()==changed && loaded.objectCount()==1,"Mixed object/creature map roundtrip");
+            std::ifstream input(path,std::ios::binary);std::string legacy{std::istreambuf_iterator<char>(input),{}};input.close();
+            // Strip v7 bindings and v8's empty inventory count for each creature.
+            std::size_t nameBytes=4;for(const auto &[id,name]:speciesWorld.document().humanNames)nameBytes+=24+name.first.size()+name.last.size();
+            legacy.resize(legacy.size()-nameBytes-8-changed.json().dump().size()-speciesWorld.creatureIds().size()*20);legacy[8]=6;
+            std::ofstream output(path+".v6",std::ios::binary);output.write(legacy.data(),legacy.size());output.close();
+            auto old=loadMap(path+".v6",{{"test.png",8,8}});check(old.findCreature(z)->species().species==scene::Species::Human && old.findCreature(human)->vocation().id==0,"Version 6 receives default components");}
+        check(scene::CreatureCatalog::fromJson(changed.json())==changed,"Definition JSON roundtrip");
+    }
     SceneWorld w(96,32); ground(w); w.setHistoryEnabled(true);
     auto player=w.spawnCreature({0,0},"player",ControlOwnership::Player);
     auto actor=w.spawnCreature({31,1},"wolf",ControlOwnership::AI,scene::ResourcePool(80,60));
@@ -76,6 +110,7 @@ int main(int argc,char **argv) {
     remote->answer(); connected.update(0.01,0.05);
     check(connected.current(actor)->source=="jev","Valid response accepted");
     connected.update(0.02,0.07,true); check(connected.current(actor)->status=="pending","Pause stops executor");
+    connected.step(0.01); check(remote->submissions==1,"Paused step cannot dispatch requests");
     connected.update(0.06,0.13); check(connected.lastOutcome(actor).at("status")=="succeeded","Outcome retained for next decision");
     connected.invalidate(); connected.update(0.01,1); remote->answer(true); connected.update(0.01,1.01);
     check(connected.metrics()["bands"][1]["staleResponses"]==1,"Stale response rejected");
@@ -107,7 +142,7 @@ int main(int argc,char **argv) {
     {
         SceneWorld bands(320,2); ground(bands); bands.spawnCreature({0,0},"player",ControlOwnership::Player);
         for(int x : {1,33,97,225,289}) bands.spawnCreature({x,1});
-        Config fair; fair.candidateCount=1; fair.waitSeconds=0.001; fair.queueWait=100;
+        Config fair; fair.provider="fake"; fair.candidateCount=1; fair.waitSeconds=0.001; fair.queueWait=100;
         for(auto &b:fair.bands) b.interval=0.001;
         DecisionSystem scheduler(bands,fair);
         for(int tick=0;tick<320;++tick) { scheduler.update(0.11,tick*0.11); check(scheduler.queuedCount()<=5,"Deduplicated queue"); }

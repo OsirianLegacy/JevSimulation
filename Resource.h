@@ -4,6 +4,7 @@
 #include <map>
 #include <stdexcept>
 #include <string>
+#include <raylib.h>
 
 namespace scene {
 // A zero maximum is a valid disabled/empty pool. Values always remain in [0, maximum].
@@ -77,15 +78,28 @@ class ResourcePool {
 // Keys are extensible (health, stamina, mana, shield, fuel, durability, ...).
 class Resource {
   public:
+    // Borrow the UI atlas for this draw only; components retain no GPU state.
+    // Draws the named pool's fill, then its frame, then centered current amount.
+    void draw(const std::string &key, Texture2D atlas, Rectangle bounds) const;
+    static Color drawColor(const std::string &key);
     static constexpr const char *Health = "health";
     static constexpr const char *Stamina = "stamina";
     static constexpr const char *Mana = "mana";
+    static constexpr const char *Hunger = "hunger";
+    static constexpr const char *Thirst = "thirst";
+    static constexpr const char *Sleep = "sleep";
+    static constexpr const char *HarvestUnits = "harvestUnits";
+    // Fraction of capacity lost per simulation second; full reserves last 10/5/15 minutes.
+    static constexpr float HungerDuration = 600, ThirstDuration = 300, SleepDuration = 900;
+    // Only present need pools are advanced. SceneWorld calls this for living creatures.
+    void advanceNeeds(float seconds);
     // Shared rules describe implemented behavior, not future gameplay mechanics.
     static constexpr const char *RulesDescription =
         "Named pools track available amounts and capacities. Values stay between zero and maximum. "
-        "Spending requires the full amount; adjustments clamp to bounds. No automatic regeneration or depletion effects.";
+        "Spending requires the full amount; adjustments clamp to bounds. Creature needs drain during simulation. "
+        "No automatic regeneration or depletion effects.";
     static constexpr const char *HealthRulesDescription =
-        "Remaining vitality. Zero means depleted; death is not automatic.";
+        "Remaining vitality. Depleted creatures cannot act; configured species become carcasses during simulation.";
     static constexpr const char *StaminaRulesDescription =
         "Pool reserved for stamina. No action costs are configured.";
     static constexpr const char *ManaRulesDescription =
@@ -96,6 +110,10 @@ class Resource {
         if (key == Health) return HealthRulesDescription;
         if (key == Stamina) return StaminaRulesDescription;
         if (key == Mana) return ManaRulesDescription;
+        if (key == Hunger) return "Food reserve: full means fed, zero means hungry. Creatures lose 1/600 of capacity per simulation second.";
+        if (key == Thirst) return "Water reserve: full means hydrated, zero means thirsty. Creatures lose 1/300 of capacity per simulation second.";
+        if (key == Sleep) return "Rest reserve: full means rested, zero means exhausted. Creatures lose 1/900 of capacity per simulation second.";
+        if (key == HarvestUnits) return "Remaining whole harvests. Each successful harvest spends one unit and produces the configured yields.";
         return CustomRulesDescription;
     }
     static constexpr std::size_t maxPools = 64, maxKeyBytes = 64;
