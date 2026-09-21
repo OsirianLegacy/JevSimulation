@@ -5,6 +5,8 @@
 #include <exception>
 #include <stdexcept>
 #include <utility>
+#include <queue>
+#include <set>
 
 using namespace scene;
 namespace {
@@ -14,6 +16,7 @@ struct CellSnapshot {
     bool operator==(const CellSnapshot &) const = default;
 };
 struct Delta {
+    std::unordered_map<Guid, std::optional<Entity>, GuidHash> creaturesBefore, creaturesAfter;
     std::unordered_map<Guid, std::optional<Resource>, GuidHash> resourcesBefore, resourcesAfter;
     std::map<std::size_t, CellSnapshot> before, after;
     std::map<std::string, std::optional<ItemDefinition>> itemsBefore, itemsAfter;
@@ -25,6 +28,17 @@ struct SceneWorld::Impl {
     Grid terrain;
     flecs::world ecs;
     std::unordered_map<Guid, flecs::entity_t, GuidHash> entities;
+    using ChunkKey = std::pair<int, int>;
+    using ChunkIndex = std::map<ChunkKey, std::unordered_set<Guid, GuidHash>>;
+    ChunkIndex creatureChunks, objectChunks;
+    std::unordered_map<std::size_t, Guid> occupied;
+    std::unordered_set<Guid, GuidHash> creatureIds;
+    std::uint64_t membershipRevision = 0;
+    static ChunkKey chunk(CellPosition p) { return {p.x / SceneWorld::chunkSize, p.y / SceneWorld::chunkSize}; }
+    static void unindex(ChunkIndex &index, CellPosition p, Guid id) {
+        auto it = index.find(chunk(p));
+        if (it != index.end() && (it->second.erase(id), it->second.empty())) index.erase(it);
+    }
     std::map<std::string, Guid> itemKeys, typeKeys; // Lookup indexes, data lives in ECS.
     std::unordered_set<Guid, GuidHash> used;
     std::vector<ComponentSchema> schemas;
@@ -153,6 +167,14 @@ CellRange SceneWorld::visibleRange(Rectangle r) const {
 }
 void SceneWorld::draw(Rectangle view, const TilesetLibrary *library) const {
     impl_->terrain.draw(view, library);
+    const auto range = visibleRange(view);
+    if (!range.empty()) for (int cy = range.minY / chunkSize; cy <= (range.maxY - 1) / chunkSize; ++cy)
+        for (int cx = range.minX / chunkSize; cx <= (range.maxX - 1) / chunkSize; ++cx)
+            for (auto id : creaturesInChunk({cx, cy})) {
+                auto e = impl_->entity(id);
+                DrawCircleV(e.get<Position>().worldPosition(), cellSize() * 0.35f,
+                    e.get<Creature>().control == ControlOwnership::Player ? SKYBLUE : ORANGE);
+            }
 }
 bool SceneWorld::hasUsedGuid(Guid id) const {
     return impl_->used.contains(id);
@@ -266,6 +288,7 @@ void SceneWorld::install(CellPosition c, const Object &object, TileRef tile) {
         if (definition != impl_->itemKeys.end())
             child.is_a(impl_->entity(definition->second));
     }
+    impl_->objectChunks[Impl::chunk(c)].insert(object.id());
     auto &cell = impl_->terrain.cells_[index(c)];
     cell.objectId = object.id();
     cell.tile(GridLayer::Objects) = tile; // Derived render/spatial cache.
@@ -275,6 +298,7 @@ void SceneWorld::eraseInstance(Guid id) {
     auto entity = impl_->entity(id);
     if (!entity)
         return;
+    if (entity.has<PlacedObject>()) Impl::unindex(impl_->objectChunks, entity.get<GridPosition>().value, id);
     std::vector<Guid> children;
     entity.children<ContainedBy>(
         [&](flecs::entity child) { children.push_back(child.get<PersistentId>().value); });
@@ -291,6 +315,7 @@ Guid SceneWorld::placeObject(CellPosition c, TileRef tile, ObjectType type) {
     Object::validate(type, false, {});
     if (!tile.present() || tile.column < 0 || tile.row < 0)
         throw std::invalid_argument("Invalid object tile.");
+    if (creatureAt(c)) throw std::invalid_argument("Cell occupied by creature.");
     if (auto existing = objectAt(c))
         return existing->id();
     const auto id = GenerateUniqueGuid();
@@ -319,7 +344,7 @@ void SceneWorld::restoreObject(CellPosition c, TileRef tile, Guid id, ObjectType
                                std::vector<Item> items) {
     const auto &cell = at(c);
     Object::validate(type, open, items);
-    if (id.empty() || hasUsedGuid(id) || !cell.objectId.empty() || !tile.present() || tile.column < 0 ||
+    if (id.empty() || hasUsedGuid(id) || creatureAt(c) || !cell.objectId.empty() || !tile.present() || tile.column < 0 ||
         tile.row < 0)
         throw std::invalid_argument("Invalid object placement or GUID.");
     std::unordered_set<Guid, GuidHash> incoming{id};
@@ -355,13 +380,15 @@ bool SceneWorld::moveObject(CellPosition from, CellPosition to) {
         return false;
     if (from == to)
         return true;
-    if (objectAt(to))
+    if (objectAt(to) || creatureAt(to))
         return false;
     Operation command(*this);
     touch(from);
     touch(to);
     auto &source = impl_->terrain.cells_[index(from)];
     auto &target = impl_->terrain.cells_[index(to)];
+    Impl::unindex(impl_->objectChunks, from, source.objectId);
+    impl_->objectChunks[Impl::chunk(to)].insert(source.objectId);
     impl_->entity(source.objectId).set<GridPosition>({to});
     target.objectId = source.objectId;
     target.tile(GridLayer::Objects) = source.tile(GridLayer::Objects);
@@ -481,12 +508,13 @@ void SceneWorld::set(CellPosition c, GridCell value) {
     for (const auto &tile : value.layers)
         if (tile.present() && (tile.column < 0 || tile.row < 0))
             throw std::invalid_argument("Invalid tile.");
-    if (at(c) == value)
+    if (at(c) == value && !creatureAt(c))
         return;
     if (value.tile(GridLayer::Objects).present() && impl_->used.size() >= maxGuidHistory)
         throw std::length_error("GUID history full.");
     Operation command(*this);
     touch(c);
+    if (auto creature = creatureAt(c)) removeCreature(*creature);
     removeObject(c);
     const auto objectTile = value.tile(GridLayer::Objects);
     value.tile(GridLayer::Objects) = {};
@@ -519,7 +547,7 @@ void SceneWorld::fillRegion(CellRange region, GridCell value) {
 }
 bool SceneWorld::isWalkable(CellPosition c) const {
     const auto *cell = tryGet(c);
-    if (!cell || !cell->tile(GridLayer::Ground).present() || cell->tile(GridLayer::Walls).present() ||
+    if (!cell || creatureAt(c) || !cell->tile(GridLayer::Ground).present() || cell->tile(GridLayer::Walls).present() ||
         cell->tile(GridLayer::Entities).present())
         return false;
     if (cell->objectId.empty())
@@ -529,7 +557,7 @@ bool SceneWorld::isWalkable(CellPosition c) const {
 }
 bool SceneWorld::blocksSight(CellPosition c) const {
     const auto *cell = tryGet(c);
-    if (!cell || cell->layersBlockSight())
+    if (!cell || creatureAt(c) || cell->layersBlockSight())
         return true;
     const auto entity = impl_->entity(cell->objectId);
     return entity && entity.has<DoorState>() && !entity.get<DoorState>().open;
@@ -557,6 +585,10 @@ WorldDocument SceneWorld::document() const {
     for (const auto &[id, handle] : impl_->entities)
         if (impl_->ecs.entity(handle).has<PlacedObject>())
             doc.objects_.emplace(id, *findObject(id));
+    for (auto id : impl_->creatureIds) {
+        auto e = findCreature(id);
+        doc.creatures.push_back({id, e->type(), e->control(), e->position()});
+    }
     doc.itemDefinitions_ = itemDefinitions();
     doc.objectTypes_ = objectTypes();
     doc.usedGuids_ = impl_->used;
@@ -616,6 +648,12 @@ SceneWorld SceneWorld::fromDocument(const WorldDocument &doc) {
     }
     if (placed.size() != doc.objects_.size())
         throw std::invalid_argument("Orphan object.");
+    for (const auto &record : doc.creatures) {
+        const auto resource = doc.resources.find(record.id);
+        if (resource == doc.resources.end() || !resource->second.find(Resource::Health))
+            throw std::invalid_argument("Creature must have health.");
+        result.installCreature(record, resource->second);
+    }
     if (doc.resources.size() > maxGuidHistory)
         throw std::invalid_argument("Too many resource owners.");
     for (const auto &[id, value] : doc.resources) {
@@ -710,7 +748,12 @@ void SceneWorld::endEdit() {
             ++it;
         }
     }
-    if (delta.before.empty() && delta.itemsBefore.empty() && delta.typesBefore.empty() &&
+    for (auto it = delta.creaturesBefore.begin(); it != delta.creaturesBefore.end();) {
+        auto after = findCreature(it->first);
+        if (after == it->second) it = delta.creaturesBefore.erase(it);
+        else { delta.creaturesAfter.emplace(it->first, after); ++it; }
+    }
+    if (delta.creaturesBefore.empty() && delta.before.empty() && delta.itemsBefore.empty() && delta.typesBefore.empty() &&
         delta.resourcesBefore.empty())
         return;
     delta.afterRevision = impl_->revision = ++impl_->nextRevision;
@@ -726,6 +769,8 @@ void SceneWorld::applyHistory(bool forward) {
         return;
     auto delta = std::move(source.back());
     source.pop_back();
+    const auto &creatures = forward ? delta.creaturesAfter : delta.creaturesBefore;
+    for (const auto &[id, value] : creatures) eraseCreature(id);
     const auto &cells = forward ? delta.after : delta.before;
     const auto &items = forward ? delta.itemsAfter : delta.itemsBefore;
     const auto &types = forward ? delta.typesAfter : delta.typesBefore;
@@ -771,6 +816,8 @@ void SceneWorld::applyHistory(bool forward) {
         if (snapshot.object)
             install(coordinates(i), *snapshot.object, snapshot.cell.tile(GridLayer::Objects));
     }
+    for (const auto &[id, value] : creatures)
+        if (value) installCreature({id, value->type(), value->control(), value->position()}, value->resources());
     for (const auto &[id, value] : forward ? delta.resourcesAfter : delta.resourcesBefore) {
         if (auto entity = impl_->entity(id)) {
             if (value)
@@ -912,6 +959,8 @@ void SceneWorld::setResource(Guid id, const std::string &key, ResourcePool pool)
     entity.set<Resource>(value);
 }
 void SceneWorld::removeResource(Guid id, const std::string &key) {
+    if (impl_->creatureIds.contains(id) && key == Resource::Health)
+        throw std::invalid_argument("Creatures require Health.");
     auto value = resources(id);
     if (!value || !value->remove(key))
         return;
@@ -938,4 +987,124 @@ bool SceneWorld::trySpendResource(Guid id, const std::string &key, float amount)
         return false;
     setResource(id, key, *pool);
     return true;
+}
+
+CellPosition SceneWorld::chunkOf(CellPosition c) const {
+    if (!contains(c)) throw std::out_of_range("Cell outside world.");
+    return {c.x / chunkSize, c.y / chunkSize};
+}
+std::vector<Guid> SceneWorld::creaturesInChunk(CellPosition chunk) const {
+    auto it = impl_->creatureChunks.find({chunk.x, chunk.y});
+    return it == impl_->creatureChunks.end() ? std::vector<Guid>{} : std::vector<Guid>(it->second.begin(), it->second.end());
+}
+std::vector<Guid> SceneWorld::objectsInChunk(CellPosition chunk) const {
+    auto it = impl_->objectChunks.find({chunk.x, chunk.y});
+    return it == impl_->objectChunks.end() ? std::vector<Guid>{} : std::vector<Guid>(it->second.begin(), it->second.end());
+}
+std::vector<Guid> SceneWorld::creatureIds() const { return {impl_->creatureIds.begin(), impl_->creatureIds.end()}; }
+std::uint64_t SceneWorld::creatureMembershipRevision() const { return impl_->membershipRevision; }
+std::optional<Guid> SceneWorld::creatureAt(CellPosition c) const {
+    if (!contains(c)) return {};
+    auto it = impl_->occupied.find(index(c));
+    return it == impl_->occupied.end() ? std::nullopt : std::optional(it->second);
+}
+std::optional<Entity> SceneWorld::findCreature(Guid id) const {
+    auto e = impl_->entity(id);
+    if (!e || !e.has<Creature>()) return {};
+    const auto &c = e.get<Creature>();
+    return Entity(id, c.type, e.get<Resource>(), e.get<Position>(), c.control);
+}
+void SceneWorld::touchCreature(Guid id) {
+    if (impl_->pending) impl_->pending->creaturesBefore.try_emplace(id, findCreature(id));
+    touchResources(id);
+}
+void SceneWorld::installCreature(const CreatureRecord &r, const Resource &resources) {
+    const auto c = r.position.cellCoordinates();
+    const auto bounds = worldBounds();
+    if (!contains(c) || creatureAt(c) || r.position.cellSize() != cellSize() ||
+        r.position.gridOrigin().x != bounds.x || r.position.gridOrigin().y != bounds.y ||
+        !resources.find(Resource::Health) || r.type.empty() || r.type.size() > Entity::maxTypeBytes ||
+        r.type.find('\0') != std::string::npos || r.type.find_first_not_of(" \t\r\n") == std::string::npos ||
+        (r.control != ControlOwnership::AI && r.control != ControlOwnership::Player))
+        throw std::invalid_argument("Invalid creature record.");
+    impl_->create(r.id).set<Creature>({r.type, r.control}).set<Position>(r.position).set<Resource>(resources);
+    impl_->occupied.emplace(index(c), r.id);
+    impl_->creatureChunks[Impl::chunk(c)].insert(r.id);
+    impl_->creatureIds.insert(r.id);
+    ++impl_->membershipRevision;
+}
+Guid SceneWorld::spawnCreature(CellPosition c, std::string type, ControlOwnership control, ResourcePool health) {
+    if (!isWalkable(c)) throw std::invalid_argument("Creature spawn cell is blocked.");
+    const auto bounds = worldBounds();
+    Entity draft(std::move(type), health, Position(cellCenter(c), cellSize(), {bounds.x, bounds.y}), control);
+    if (impl_->used.size() >= maxGuidHistory) throw std::length_error("GUID history full.");
+    Operation command(*this);
+    touchCreature(draft.id());
+    installCreature({draft.id(), draft.type(), control, draft.position()}, draft.resources());
+    return draft.id();
+}
+void SceneWorld::eraseCreature(Guid id) {
+    auto e = impl_->entity(id);
+    if (!e || !e.has<Creature>()) return;
+    const auto c = e.get<Position>().cellCoordinates();
+    impl_->occupied.erase(index(c));
+    Impl::unindex(impl_->creatureChunks, c, id);
+    impl_->creatureIds.erase(id);
+    e.destruct(); impl_->entities.erase(id);
+    ++impl_->membershipRevision;
+}
+void SceneWorld::removeCreature(Guid id) {
+    if (!impl_->creatureIds.contains(id)) return;
+    Operation command(*this); touchCreature(id); eraseCreature(id);
+}
+bool SceneWorld::moveCreature(Guid id, CellPosition to) {
+    auto e = impl_->entity(id);
+    if (!e || !e.has<Creature>() || !contains(to)) return false;
+    const auto from = e.get<Position>().cellCoordinates();
+    if (from == to) return true;
+    if (!isWalkable(to)) return false;
+    Operation command(*this); touchCreature(id);
+    auto position = e.get<Position>(); position.setWorldPosition(cellCenter(to));
+    e.set<Position>(position);
+    impl_->occupied.erase(index(from)); impl_->occupied.emplace(index(to), id);
+    Impl::unindex(impl_->creatureChunks, from, id);
+    impl_->creatureChunks[Impl::chunk(to)].insert(id);
+    return true;
+}
+// Sparse four-way search avoids allocating world-sized scratch arrays for every creature.
+std::vector<CellPosition> SceneWorld::creaturePath(Guid id, CellPosition goal, std::size_t maxNodes) const {
+    auto creature = findCreature(id);
+    if (!creature || !contains(goal)) return {};
+    auto start = creature->position().cellCoordinates();
+    if (start == goal) return {start};
+    if (!isWalkable(goal)) return {};
+    std::unordered_map<std::size_t, std::size_t> parent;
+    std::queue<CellPosition> open; open.push(start); parent[index(start)] = index(start);
+    while (!open.empty()) {
+        const auto c = open.front(); open.pop();
+        for (auto next : neighbors(c, false, true)) {
+            const auto ni = index(next);
+            if (parent.contains(ni)) continue;
+            if (parent.size() >= maxNodes) return {};
+            parent[ni] = index(c);
+            if (next == goal) {
+                std::vector<CellPosition> result{goal};
+                for (auto i = ni; i != index(start);) { i = parent.at(i); result.push_back(coordinates(i)); }
+                std::reverse(result.begin(), result.end()); return result;
+            }
+            open.push(next);
+        }
+    }
+    return {};
+}
+std::vector<std::pair<CellPosition, int>> SceneWorld::reachableCells(Guid id, int radius) const {
+    if (radius < 0 || radius > 128) throw std::invalid_argument("Perception radius outside supported range.");
+    auto creature = findCreature(id); if (!creature) return {};
+    std::vector<std::pair<CellPosition,int>> found{{creature->position().cellCoordinates(),0}};
+    std::unordered_set<std::size_t> visited{index(found.front().first)};
+    for (std::size_t i = 0; i < found.size(); ++i) {
+        const auto [c,d] = found[i]; if (d == radius) continue;
+        for (auto n : neighbors(c, false, true)) if (visited.insert(index(n)).second) found.emplace_back(n,d+1);
+    }
+    return found;
 }

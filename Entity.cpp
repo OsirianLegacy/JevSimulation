@@ -2,12 +2,14 @@
 #include <stdexcept>
 #include <utility>
 
-Entity::Entity(std::string type, scene::ResourcePool health, scene::Position position)
-    : type_(std::move(type)), position_(position) {
+Entity::Entity(std::string type, scene::ResourcePool health, scene::Position position, ControlOwnership control)
+    : type_(std::move(type)), position_(position), control_(control) {
     if (type_.empty() || type_.size() > maxTypeBytes ||
         type_.find('\0') != std::string::npos ||
         type_.find_first_not_of(" \t\r\n") == std::string::npos)
         throw std::invalid_argument("Entity type must be nonblank and at most 255 bytes.");
+    if (control != ControlOwnership::Player && control != ControlOwnership::AI)
+        throw std::invalid_argument("Invalid control ownership.");
     resources_.set(scene::Resource::Health, health);
     id_ = GenerateUniqueGuid();
 }

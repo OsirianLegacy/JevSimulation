@@ -11,10 +11,12 @@ class NodeProcess {
 public:
     NodeProcess(const std::wstring& executable,
                 const std::vector<std::wstring>& arguments,
-                const std::wstring& workingDirectory);
+                const std::wstring& workingDirectory, bool protocol = false);
     ~NodeProcess();
     NodeProcess(const NodeProcess&) = delete;
     NodeProcess& operator=(const NodeProcess&) = delete;
+    bool sendLine(const std::string &line); // One bounded request outstanding in protocol mode.
+    std::optional<std::string> readLine(); // Nonblocking, bounded response.
     unsigned long id() const;
     int wait() const;
     std::optional<int> poll() const; // Empty while Node is running; never blocks.

@@ -13,6 +13,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <algorithm>
 
 // Own this object for the application's lifetime. Closing the job also kills
 // Node if CLion forcibly stops the application (without running destructors).
@@ -20,7 +21,7 @@ class NodeProcess::Impl {
 public:
     Impl(const std::wstring& executable,
                 const std::vector<std::wstring>& arguments,
-                const std::wstring& workingDirectory) {
+                const std::wstring& workingDirectory, bool protocol) {
         job_ = CreateJobObjectW(nullptr, nullptr); // Non-inheritable, parent only.
         if (!job_) fail("CreateJobObject");
         try {
@@ -42,12 +43,22 @@ public:
             startup.hStdInput = input.value;
             startup.hStdOutput = output.value;
             startup.hStdError = error.value;
+            if (protocol) {
+                SECURITY_ATTRIBUTES security{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
+                if (!CreatePipe(&childInput_, &input_, &security, 65536) ||
+                    !CreatePipe(&output_, &childOutput_, &security, 65536)) fail("Create protocol pipes");
+                if (!SetHandleInformation(input_, HANDLE_FLAG_INHERIT, 0) ||
+                    !SetHandleInformation(output_, HANDLE_FLAG_INHERIT, 0)) fail("Protocol inheritance");
+                startup.hStdInput = childInput_; startup.hStdOutput = childOutput_;
+            }
             PROCESS_INFORMATION child{};
             // Suspend until ownership is established; Node cannot run unowned.
             if (!CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr,
                                 TRUE, CREATE_SUSPENDED | CREATE_NO_WINDOW, nullptr,
                                 workingDirectory.c_str(), &startup, &child)) fail("CreateProcess");
             process_ = child.hProcess;
+            if (childInput_) { CloseHandle(childInput_); childInput_ = nullptr; }
+            if (childOutput_) { CloseHandle(childOutput_); childOutput_ = nullptr; }
             const bool assigned = AssignProcessToJobObject(job_, process_) != FALSE;
             const DWORD assignError = GetLastError();
             const DWORD resumed = assigned ? ResumeThread(child.hThread) : DWORD(-1);
@@ -68,6 +79,30 @@ public:
     ~Impl() { close(); }
 
 
+    bool sendLine(const std::string &line) {
+        if (!input_ || outstanding_ || line.size() > 8192 || line.find_first_of("\r\n") != std::string::npos) return false;
+        if (poll()) return false;
+        // One request, smaller than the pipe buffer. No second write until a response.
+        const auto wire = line + "\n"; DWORD written = 0;
+        if (!WriteFile(input_, wire.data(), static_cast<DWORD>(wire.size()), &written, nullptr) || written != wire.size())
+            throw std::runtime_error("Bridge input closed.");
+        outstanding_ = true; return true;
+    }
+    std::optional<std::string> readLine() {
+        if (!output_) return {};
+        DWORD available = 0;
+        if (!PeekNamedPipe(output_, nullptr, 0, nullptr, &available, nullptr)) throw std::runtime_error("Bridge output closed.");
+        if (available) {
+            char bytes[16384]; DWORD received = 0;
+            if (!ReadFile(output_, bytes, std::min<DWORD>(available, sizeof(bytes)), &received, nullptr))
+                throw std::runtime_error("Bridge read failed.");
+            buffered_.append(bytes, received);
+        }
+        if (buffered_.size() > 16384) throw std::runtime_error("Bridge response exceeds limit.");
+        const auto end = buffered_.find('\n');
+        if (end == std::string::npos) return {};
+        auto result = buffered_.substr(0, end); buffered_.erase(0, end+1); outstanding_ = false; return result;
+    }
     DWORD id() const { return GetProcessId(process_); }
 
     std::optional<int> poll() const {
@@ -112,6 +147,9 @@ private:
         InheritedHandle& operator=(const InheritedHandle&) = delete;
     };
 
+    HANDLE input_ = nullptr, output_ = nullptr, childInput_ = nullptr, childOutput_ = nullptr;
+    bool outstanding_ = false;
+    std::string buffered_;
     HANDLE job_ = nullptr;
     HANDLE process_ = nullptr;
 
@@ -135,6 +173,8 @@ private:
     }
 
     void close() noexcept {
+        for (auto handle : {input_, output_, childInput_, childOutput_}) if (handle) CloseHandle(handle);
+        input_ = output_ = childInput_ = childOutput_ = nullptr;
         if (job_) { CloseHandle(job_); job_ = nullptr; }
         if (process_) {
             WaitForSingleObject(process_, 5000);
@@ -146,10 +186,13 @@ private:
 
 NodeProcess::NodeProcess(const std::wstring& executable,
                          const std::vector<std::wstring>& arguments,
-                         const std::wstring& workingDirectory)
-    : impl_(std::make_unique<Impl>(executable, arguments, workingDirectory)) {}
+                         const std::wstring& workingDirectory, bool protocol)
+    : impl_(std::make_unique<Impl>(executable, arguments, workingDirectory, protocol)) {}
 NodeProcess::~NodeProcess() = default;
 unsigned long NodeProcess::id() const { return impl_->id(); }
 int NodeProcess::wait() const { return impl_->wait(); }
 std::optional<int> NodeProcess::poll() const { return impl_->poll(); }
 
+
+bool NodeProcess::sendLine(const std::string &line) { return impl_->sendLine(line); }
+std::optional<std::string> NodeProcess::readLine() { return impl_->readLine(); }

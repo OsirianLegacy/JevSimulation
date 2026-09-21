@@ -23,7 +23,7 @@ int main(int argc, char **argv) {
         const TileRef tile{0, 0, 0};
         {
             SceneWorld empty;
-            check(empty.count() == 1'000'000 && empty.persistentEntityCount() == 0,
+            check(empty.count() == 4'194'304 && empty.persistentEntityCount() == 0,
                   "Terrain must remain dense, without ECS entities");
             check(empty.visibleRange({0, 0, 80, 80}).maxX == 10, "Visible range remains bounded");
         }

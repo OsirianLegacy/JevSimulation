@@ -1,8 +1,16 @@
 #pragma once
 #include "Grid.h"
 #include "Resource.h"
+#include "Entity.h"
 #include <map>
 #include <unordered_map>
+struct CreatureRecord {
+    Guid id;
+    std::string type;
+    ControlOwnership control = ControlOwnership::AI;
+    scene::Position position;
+    bool operator==(const CreatureRecord &) const = default;
+};
 struct GuidState {
     std::map<std::string, Guid> items, types;
     std::unordered_map<Guid, std::vector<Guid>, GuidHash> contents;
@@ -13,7 +21,7 @@ struct GuidState {
 // gameplay, navigation, editing, and runtime ownership belong to SceneWorld.
 class WorldDocument {
   public:
-    explicit WorldDocument(int width = 1000, int height = 1000, float cellSize = 8, Vector2 origin = {});
+    explicit WorldDocument(int width = 2048, int height = 2048, float cellSize = 8, Vector2 origin = {});
     int width() const {
         return width_;
     }
@@ -50,6 +58,7 @@ class WorldDocument {
     const auto &objectTypes() const {
         return objectTypes_;
     }
+    std::vector<CreatureRecord> creatures;
     // Optional extension records, keyed by persistent instance identity.
     std::unordered_map<Guid, scene::Resource, GuidHash> resources;
     GuidState guidState() const;

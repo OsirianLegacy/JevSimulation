@@ -1,3 +1,12 @@
+# Entity decision loop
+
+See [AI_DECISIONS.md](AI_DECISIONS.md) for the runnable AI demo, offline stress test,
+chunk scheduling, goal outcomes, local proxy, and tuning configuration. New worlds
+default to 2048x2048; old saves retain their dimensions. Normal startup no longer
+sends a live Jev smoke inquiry; use `--jev-smoke-test` explicitly.
+
+The historical setup notes below describe the earlier connectivity prototype.
+
 # Jev inquiry smoke test
 
 Calls `typesafe-ai/jev` through Vercel AI Gateway from Node.js 22+. No additional packages or deployment are required.

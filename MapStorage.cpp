@@ -10,7 +10,7 @@
 #include <unordered_set>
 
 namespace {
-constexpr std::uint32_t maxCells = 1'000'000, maxSheets = 4096;
+constexpr std::uint32_t maxCells = 2048 * 2048, maxSheets = 4096;
 void require(bool good, const char* message) { if (!good) throw std::runtime_error(message); }
 void write32(std::ostream& out, std::uint32_t value) {
     for (int shift = 0; shift < 32; shift += 8) out.put(static_cast<char>((value >> shift) & 255));
@@ -54,7 +54,7 @@ void validateCatalog(const std::vector<TilesetDescriptor>& sheets) {
 
 void saveDocument(const std::filesystem::path& file, const WorldDocument& grid, const std::vector<TilesetDescriptor>& sheets) {
     validateCatalog(sheets);
-    require(grid.count() <= maxCells && grid.cellSize() == 8, "Maps must use 8x8 cells and at most one million cells.");
+    require(grid.count() <= maxCells && grid.cellSize() == 8, "Maps must use 8x8 cells and at most 2048x2048 cells.");
     std::vector<int> used(sheets.size(), -1);
     std::vector<int> ids;
     std::uint32_t records = 0;
@@ -77,7 +77,7 @@ void saveDocument(const std::filesystem::path& file, const WorldDocument& grid, 
         std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
         require(static_cast<bool>(out), "Cannot create temporary map save.");
         out.write("JEVMAP01", 8);
-        write32(out, grid.resources.empty() ? 4 : 5); // Version 5 adds optional resource pools.
+        write32(out, !grid.creatures.empty() ? 6 : grid.resources.empty() ? 4 : 5); // Version 5 adds optional resource pools.
         write32(out, grid.width()); write32(out, grid.height());
         write32(out, std::bit_cast<std::uint32_t>(grid.cellSize()));
         const auto bounds = grid.worldBounds();
@@ -111,7 +111,15 @@ void saveDocument(const std::filesystem::path& file, const WorldDocument& grid, 
             for (const auto& item : object->contents()) {
                 writeText(out, item.definitionId); writeText(out, item.displayName); write32(out, item.quantity);
             }
-        require(out.tellp() <= 85'000'000, "Map file is too large.");
+        if (!grid.creatures.empty()) {
+            write32(out, static_cast<std::uint32_t>(grid.creatures.size()));
+            for (const auto &r : grid.creatures) {
+                writeGuid(out, r.id); writeText(out, r.type); write32(out, static_cast<std::uint32_t>(r.control));
+                write32(out, std::bit_cast<std::uint32_t>(r.position.worldPosition().x));
+                write32(out, std::bit_cast<std::uint32_t>(r.position.worldPosition().y));
+            }
+        }
+        require(out.tellp() <= 400'000'000, "Map file is too large.");
         }
         write32(out,static_cast<std::uint32_t>(grid.itemDefinitions().size()));
         for (const auto& [id,item] : grid.itemDefinitions()) { writeText(out,id); writeText(out,item.displayName); }
@@ -143,7 +151,7 @@ void saveDocument(const std::filesystem::path& file, const WorldDocument& grid, 
         }
         write32(out,static_cast<std::uint32_t>(state.used.size()));
         for(auto id:state.used) writeGuid(out,id);
-            if(!grid.resources.empty()) {
+            if(!grid.resources.empty() || !grid.creatures.empty()) {
             write32(out,static_cast<std::uint32_t>(grid.resources.size()));
             for(const auto& [owner,resource]:grid.resources){
                 writeGuid(out,owner);write32(out,static_cast<std::uint32_t>(resource.pools().size()));
@@ -152,7 +160,15 @@ void saveDocument(const std::filesystem::path& file, const WorldDocument& grid, 
                 }
             }
         }
-        require(out.tellp() <= 85'000'000,"Map file is too large.");
+        if (!grid.creatures.empty()) {
+            write32(out, static_cast<std::uint32_t>(grid.creatures.size()));
+            for (const auto &r : grid.creatures) {
+                writeGuid(out, r.id); writeText(out, r.type); write32(out, static_cast<std::uint32_t>(r.control));
+                write32(out, std::bit_cast<std::uint32_t>(r.position.worldPosition().x));
+                write32(out, std::bit_cast<std::uint32_t>(r.position.worldPosition().y));
+            }
+        }
+        require(out.tellp() <= 400'000'000,"Map file is too large.");
         out.flush(); require(static_cast<bool>(out), "Map write failed; previous save preserved.");
         out.close(); require(!out.fail(), "Map close failed; previous save preserved.");
         replaceFile(temporary, file);
@@ -165,13 +181,13 @@ void saveDocument(const std::filesystem::path& file, const WorldDocument& grid, 
 
 WorldDocument loadDocument(const std::filesystem::path& file, const std::vector<TilesetDescriptor>& sheets) {
     validateCatalog(sheets);
-    require(std::filesystem::file_size(file) <= 85'000'000, "Map file is too large.");
+    require(std::filesystem::file_size(file) <= 400'000'000, "Map file is too large.");
     std::ifstream in(file, std::ios::binary);
     require(static_cast<bool>(in), "Cannot open map save.");
     char magic[8]{}; in.read(magic, 8);
     require(std::string(magic, 8) == "JEVMAP01", "Not a JevSimulation map.");
     const auto version = read32(in);
-    require(version >= 1 && version <= 5, "Unsupported map version.");
+    require(version >= 1 && version <= 6, "Unsupported map version.");
     const auto width = read32(in), height = read32(in);
     const float size = std::bit_cast<float>(read32(in));
     const float x = std::bit_cast<float>(read32(in)), y = std::bit_cast<float>(read32(in));
@@ -302,6 +318,17 @@ WorldDocument loadDocument(const std::filesystem::path& file, const std::vector<
             }
             require(loaded.resources.emplace(owner,std::move(resource)).second,"Duplicate resource owner.");
         }
+    }
+    if (version >= 6) {
+        const auto count = read32(in); require(count <= loaded.count(), "Too many creatures.");
+        std::unordered_set<Guid, GuidHash> seen;
+        for (std::uint32_t i = 0; i < count; ++i) {
+            const auto id = readGuid(in); const auto type = readText(in); const auto control = read32(in);
+            const float wx = std::bit_cast<float>(read32(in)), wy = std::bit_cast<float>(read32(in));
+            require(control <= 1 && seen.insert(id).second, "Invalid creature control or duplicate identity.");
+            loaded.creatures.push_back({id, type, static_cast<ControlOwnership>(control), scene::Position({wx, wy}, size, {x, y})});
+        }
+        loaded.validateGuidState(loaded.guidState());
     }
     require(in.peek() == std::char_traits<char>::eof() && !in.bad(), "Unexpected data after map records.");
     return loaded;

@@ -1,6 +1,7 @@
 #pragma once
 #include "Grid.h"
 #include "Resource.h"
+#include "Entity.h"
 #include <flecs.h>
 #include <functional>
 
@@ -23,6 +24,7 @@ struct ContainerState {
 struct Gatherable {};
 struct Inventory {};
 struct PlacedObject {};
+struct Creature { std::string type; ControlOwnership control = ControlOwnership::AI; };
 struct ContainedBy {};
 struct ItemOrder {
     std::uint32_t value = 0;
@@ -58,6 +60,8 @@ struct ComponentSchema {
 };
 // The curated inspector's single registration point. Identity/composition are read-only.
 inline std::vector<ComponentSchema> registerComponents(flecs::world &ecs) {
+    ecs.component<Position>().add(flecs::OnInstantiate, flecs::DontInherit);
+    ecs.component<Creature>().add(flecs::OnInstantiate, flecs::DontInherit);
     ecs.component<Resource>().add(flecs::OnInstantiate, flecs::Override);
     ecs.component<PersistentId>().add(flecs::OnInstantiate, flecs::DontInherit);
     ecs.component<GridPosition>().add(flecs::OnInstantiate, flecs::DontInherit);
@@ -67,6 +71,8 @@ inline std::vector<ComponentSchema> registerComponents(flecs::world &ecs) {
     ecs.component<ContainerState>().member<bool>("open");
     ecs.component<ContainedBy>().add(flecs::Exclusive).add(flecs::OnDeleteTarget, flecs::Delete);
     return {
+        {ecs.id<Position>(), "Position", {{"location", "json", false, [](flecs::entity e) { return e.get<Position>().fetchData(); }}}},
+        {ecs.id<Creature>(), "Creature", {{"type", "text", false, [](flecs::entity e) { return e.get<Creature>().type; }}}},
         {ecs.id<Resource>(),
          "Resource",
          {{"pools", "resource-pools", false,

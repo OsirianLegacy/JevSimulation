@@ -171,6 +171,7 @@ void WorldDocument::validateGuidState(const GuidState &state) const {
         if (id.empty() || !state.used.contains(id) || !active.insert(id).second)
             throw std::invalid_argument("Missing, empty, or duplicate GUID across world systems.");
     };
+    for (const auto &creature : creatures) claim(creature.id);
     for (const auto &[key, item] : itemDefinitions_)
         claim(state.items.at(key));
     for (const auto &[key, type] : objectTypes_)

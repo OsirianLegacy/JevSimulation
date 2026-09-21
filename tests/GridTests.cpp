@@ -16,7 +16,7 @@ bool near(float a, float b) { return std::abs(a - b) < 0.05f; }
 
 int main() {
     try {
-        SceneWorld world;
+        SceneWorld world(1000, 1000); // Explicit legacy dimensions remain supported.
         check(world.cellSize() == 8 && !world.isWalkable({0, 0}) && !world.isWalkable({999, 999}), "Empty 8x8 grid is not walkable.");
         check(world.count() == 1'000'000, "Million-cell grid allocation.");
         check(world.index({999, 999}) == 999'999, "Last cell index.");

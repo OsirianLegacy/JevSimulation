@@ -47,7 +47,7 @@ struct CellRange {
 
 class Grid {
 public:
-    explicit Grid(int width=1000,int height=1000,float cellSize=8,Vector2 origin={});
+    explicit Grid(int width=2048,int height=2048,float cellSize=8,Vector2 origin={});
     int width() const { return width_; }
     int height() const { return height_; }
     float cellSize() const { return cellSize_; }

@@ -8,6 +8,8 @@
 #include "NodeProcess.h"
 #include "NodeConfig.h"
 #include "SceneWorld.h"
+#include "DecisionBridge.h"
+#include "AIDemo.h"
 #include "WorldCamera.h"
 #include "TilesetEditor.h"
 #include "PlaySession.h"
@@ -29,24 +31,34 @@ struct GameWindow {
 int main(int argc, char* argv[])
 {
     try {
-        bool dryRun=false,smokeTest=false,gameMode=false;
+        bool dryRun=false,smokeTest=false,gameMode=false,aiDemo=false,aiStress=false,liveSmoke=false;
+        std::string aiConfig=JevAIConfig;
         for(int i=1;i<argc;++i){
             const std::string_view argument(argv[i]);
             if(argument=="--dry-run")dryRun=true;
             else if(argument=="--window-smoke-test")smokeTest=true;
             else if(argument=="--game")gameMode=true;
-            else throw std::runtime_error("Usage: JevSimulation [--game] [--window-smoke-test] | --dry-run");
+            else if(argument=="--ai-demo")aiDemo=true;
+            else if(argument=="--ai-stress")aiStress=true;
+            else if(argument=="--jev-smoke-test")liveSmoke=true;
+            else if(argument=="--ai-config" && i+1<argc)aiConfig=argv[++i];
+            else throw std::runtime_error("Usage: JevSimulation [--game | --ai-demo | --ai-stress] [--ai-config path] [--window-smoke-test] | --dry-run | --jev-smoke-test");
         }
+        if(aiDemo || aiStress) return runAIDemo(aiConfig,aiStress,smokeTest);
+        const auto decisionConfig=ai::Config::load(aiConfig);
         if(dryRun && (gameMode || smokeTest))throw std::runtime_error("--dry-run is a standalone headless mode.");
         std::vector<std::wstring> arguments{JevTestScript};
         if (dryRun || smokeTest) arguments.emplace_back(L"--dry-run");
-        if (dryRun) {
+        if (dryRun || liveSmoke) {
             NodeProcess node(JevNodeExecutable, arguments, JevProjectDirectory);
             return node.wait();
         }
 
         GameWindow window(smokeTest);
-        SceneWorld grid(1000, 1000, 8.0f);
+        SceneWorld grid;
+        std::unique_ptr<ai::DecisionSystem> decisions;
+        SceneWorld *decisionWorld=nullptr;
+        double lastDecisionTime=0;
         TilesetLibrary tilesets(JevTilesetDirectory);
         TilesetEditor authorEditor(tilesets,true);
         std::unique_ptr<TilesetEditor> runtimeEditor;
@@ -67,6 +79,7 @@ int main(int argc, char* argv[])
                     grid.markSaved();
                     mapStatus = "Saved Maps/world.jevmap";
                 } else {
+                    decisions.reset(); decisionWorld=nullptr;
                     auto loaded = loadMap(JevMapFile, catalog);
                     grid = std::move(loaded);
                     grid.setHistoryEnabled(true);
@@ -87,11 +100,11 @@ int main(int argc, char* argv[])
         std::error_code mapFileError;
         if (!smokeTest && std::filesystem::exists(JevMapFile, mapFileError)) mapAction(MapAction::Load);
         grid.setHistoryEnabled(true);
-        std::cout << "[INFO] JevSimulation starting Node..." << std::endl;
+
         std::unique_ptr<NodeProcess> node;
-        std::optional<int> result;
+        std::optional<int> result = smokeTest ? std::nullopt : std::optional(0);
         try {
-            node = std::make_unique<NodeProcess>(JevNodeExecutable, arguments, JevProjectDirectory);
+            if (smokeTest) node = std::make_unique<NodeProcess>(JevNodeExecutable, arguments, JevProjectDirectory);
         } catch (const std::exception& error) {
             std::cerr << "[ERROR] Node startup: " << error.what() << std::endl;
             result = 1;
@@ -123,6 +136,7 @@ int main(int argc, char* argv[])
                     } else if(transport==TransportAction::Pause)play.pause(!play.paused());
                     else if(transport==TransportAction::Step)play.step();
                     else if(transport==TransportAction::Stop && play.active()){
+                        decisions.reset(); decisionWorld=nullptr;
                         play.stop(grid);smokePlayStopped=true;runtimeEditor.reset();worldCamera=*authorCamera;authorCamera.reset();
                     }
                 }catch(const std::exception& error){mapStatus=error.what();mapError=true;}
@@ -131,6 +145,19 @@ int main(int argc, char* argv[])
                 editor->setPlayState(play.active(),play.paused());
                 play.advance(GetFrameTime());
             }else gameStepper.advance(grid,GetFrameTime());
+            if (gameMode || play.active()) {
+                if (decisionWorld != activeWorld) {
+                    decisions.reset(); std::unique_ptr<ai::Transport> transport;
+                    if (decisionConfig.provider=="proxy") transport=std::make_unique<ai::BridgeTransport>(
+                        JevNodeExecutable,JevDecisionBridge,JevProjectDirectory,decisionConfig.proxyUrl,decisionConfig.timeout);
+                    decisions=std::make_unique<ai::DecisionSystem>(*activeWorld,decisionConfig,std::move(transport));
+                    decisionWorld=activeWorld; lastDecisionTime=activeWorld->simulationTime();
+                }
+                const auto time=activeWorld->simulationTime();
+                if (time > lastDecisionTime || (play.active() && play.paused()))
+                    decisions->update(std::max(0.0,time-lastDecisionTime),GetTime(),play.active() && play.paused());
+                lastDecisionTime=time;
+            }
             if (smokeTest) worldCamera.pan({1, 1}, 1.0f / 60);
             // Update: poll once per frame; network I/O never blocks the game.
             if (node && !result) {
@@ -178,6 +205,8 @@ int main(int argc, char* argv[])
         }
         if(smokeTest && !gameMode && (!smokePlayStarted || !smokePlayStopped || play.active()))throw std::runtime_error("Play smoke test failed to stop.");
         if(smokeTest && gameMode && grid.ticks()==0)throw std::runtime_error("Game mode did not simulate.");
+        if(decisions) std::cout << decisions->metrics().dump() << std::endl;
+        decisions.reset();
         if(play.active())play.stop(grid);
         if (smokeTest && (!result || *result != 0 || framesAfterResult < 30)) {
             throw std::runtime_error("Window smoke test did not keep drawing after Node completed.");

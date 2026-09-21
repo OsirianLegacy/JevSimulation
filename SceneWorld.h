@@ -3,7 +3,22 @@
 #include <memory>
 class SceneWorld {
   public:
-    explicit SceneWorld(int width = 1000, int height = 1000, float cellSize = 8.0f, Vector2 origin = {});
+    explicit SceneWorld(int width = 2048, int height = 2048, float cellSize = 8.0f, Vector2 origin = {});
+    static constexpr int chunkSize = 32;
+    CellPosition chunkOf(CellPosition cell) const;
+    std::vector<Guid> creaturesInChunk(CellPosition chunk) const;
+    std::vector<Guid> objectsInChunk(CellPosition chunk) const;
+    std::vector<Guid> creatureIds() const;
+    std::uint64_t creatureMembershipRevision() const;
+    Guid spawnCreature(CellPosition cell, std::string type = "creature",
+                       ControlOwnership control = ControlOwnership::AI,
+                       scene::ResourcePool health = scene::ResourcePool{});
+    std::optional<Entity> findCreature(Guid id) const;
+    std::optional<Guid> creatureAt(CellPosition cell) const;
+    bool moveCreature(Guid id, CellPosition destination);
+    void removeCreature(Guid id);
+    std::vector<CellPosition> creaturePath(Guid id, CellPosition destination, std::size_t maxNodes = 4096) const;
+    std::vector<std::pair<CellPosition, int>> reachableCells(Guid id, int radius) const;
     int width() const;
     int height() const;
     float cellSize() const;
@@ -103,6 +118,9 @@ class SceneWorld {
     struct Impl;
     struct Operation;
     std::unique_ptr<Impl> impl_;
+    void touchCreature(Guid id);
+    void installCreature(const CreatureRecord &record, const scene::Resource &resources);
+    void eraseCreature(Guid id);
     void touch(CellPosition cell);
     void touchResources(Guid id);
     void install(CellPosition cell, const Object &object, TileRef tile);

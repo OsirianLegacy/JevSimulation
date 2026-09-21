@@ -4,3 +4,6 @@ inline constexpr wchar_t JevProjectDirectory[] = LR"jev(@CMAKE_CURRENT_SOURCE_DI
 inline constexpr wchar_t JevTestScript[] = LR"jev(@CMAKE_CURRENT_SOURCE_DIR@/scripts/test-jev.mjs)jev";
 inline constexpr wchar_t JevTilesetDirectory[] = LR"jev(@CMAKE_CURRENT_SOURCE_DIR@/Assets/Tilesets)jev";
 inline constexpr wchar_t JevMapFile[] = LR"jev(@CMAKE_CURRENT_SOURCE_DIR@/Maps/world.jevmap)jev";
+
+inline constexpr wchar_t JevDecisionBridge[] = LR"jev(@CMAKE_CURRENT_SOURCE_DIR@/scripts/decision-bridge.mjs)jev";
+inline constexpr char JevAIConfig[] = R"jev(@CMAKE_CURRENT_SOURCE_DIR@/ai-config.json)jev";

@@ -15,8 +15,9 @@ float remainingHealth = wolf.health().current(); // 65
 ```
 
 Type keys identify future component compositions without requiring inheritance
-per species. World placement, Flecs attachment, creature type catalogs, editor
-controls, and creature serialization are future integration work. Depleted health
+per species. World placement, Flecs ownership, chunk indexing, creature serialization, and
+undo/redo are now supported through SceneWorld. Creature type catalogs and
+creature-specific editor controls remain future work. Depleted health
 does not automatically destroy an entity.
 
 ## Component data for Jev
@@ -63,7 +64,8 @@ or unrepresentable coordinates without changing the previous state. Cell updates
 also reject corners that cannot map back to the requested cell at float precision.
 World bounds and occupancy are checked by the world, not this data component.
 Copies retain independent position state. Fetching does not move the entity or
-send a Jev request; existing world-placement integration remains future work.
+send a Jev request; world movement commands maintain occupancy and chunk membership.
+See [AI_DECISIONS.md](AI_DECISIONS.md) for runtime commands and the decision loop.
 
 ## Range
 

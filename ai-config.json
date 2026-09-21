@@ -1,0 +1,51 @@
+{
+  "version": 1,
+  "provider": "fake",
+  "proxyUrl": "http://127.0.0.1:8787/decision",
+  "seed": 12345,
+  "bands": [
+    {
+      "maxDistance": 0,
+      "interval": 1,
+      "weight": 8
+    },
+    {
+      "maxDistance": 1,
+      "interval": 2,
+      "weight": 4
+    },
+    {
+      "maxDistance": 3,
+      "interval": 5,
+      "weight": 2
+    },
+    {
+      "maxDistance": 7,
+      "interval": 15,
+      "weight": 1
+    },
+    {
+      "maxDistance": 2147483647,
+      "interval": 60,
+      "weight": 1
+    }
+  ],
+  "batchSize": 32,
+  "requestsPerSecond": 10,
+  "timeout": 2,
+  "queueWait": 2,
+  "backoffMin": 1,
+  "backoffMax": 30,
+  "perceptionRadius": 8,
+  "candidateCount": 4,
+  "payloadBytes": 8192,
+  "moveStepSeconds": 0.25,
+  "waitSeconds": 1,
+  "rerouteAttempts": 2,
+  "proxy": {
+    "port": 8787,
+    "maxConcurrency": 8,
+    "requestsPerSecond": 40
+  },
+  "trace": false
+}
